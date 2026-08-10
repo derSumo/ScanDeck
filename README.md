@@ -47,7 +47,11 @@ docker compose pull && docker compose up -d
 docker compose down
 ```
 
-Wer das Image lieber selbst baut, kommentiert in der `docker-compose.yaml` den `build:`-Block ein und startet mit `docker compose up -d --build`.
+Wer das Image lieber selbst baut, klont das Repository und nutzt das mitgelieferte [Dockerfile](Dockerfile):
+
+```bash
+docker build -t scandeck .
+```
 
 ### Dateirechte
 

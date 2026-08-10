@@ -2,31 +2,22 @@ services:
   scandeck:
     image: ghcr.io/dersumo/scandeck:latest
     container_name: scandeck
+    restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      APP_DATA_DIR: /data
-      SCAN_OUTPUT_DIR: /scans
-      # Der Container richtet die Rechte der gemounteten Ordner beim Start
-      # selbst ein. Sollen die Dateien einem bestimmten Host-Benutzer gehoeren,
-      # dessen IDs hier eintragen (auf dem Host mit "id -u" / "id -g" ablesen).
-      # PUID: 1000
-      # PGID: 1000
-      # Nothing is preconfigured: the first start opens the setup wizard and
-      # persists everything to ./data/config.json. These optional variables only
-      # prefill the wizard for an unattended rollout.
-      # SCANNER_URL: https://10.0.0.31:443
-      # PAPERLESS_URL: http://paperless:8000
-      # PAPERLESS_TOKEN: replace-with-your-token
-      # DISCOVERY_SUBNET: 10.0.0.0/24
     volumes:
       - ./data:/data
       - ./scans:/scans
-    restart: unless-stopped
+    environment:
+      APP_DATA_DIR: /data
+      SCAN_OUTPUT_DIR: /scans
 
-    # Das Image selbst bauen statt es zu ziehen? Dann die Zeile "image:" oben
-    # auskommentieren und diesen Block aktivieren:
-    # build:
-    #   context: .
-    #   args:
-    #     APP_VERSION: "1.0.0"
+      # Optional: Dateien einem Host-Benutzer zuordnen (id -u / id -g)
+      # PUID: 1000
+      # PGID: 1000
+
+      # Optional: Einrichtungsassistent vorbelegen
+      # SCANNER_URL: https://10.0.0.31:443
+      # DISCOVERY_SUBNET: 10.0.0.0/24
+      # PAPERLESS_URL: http://paperless:8000
+      # PAPERLESS_TOKEN: dein-token
