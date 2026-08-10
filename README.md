@@ -1,24 +1,53 @@
 # ScanDeck
 
-Eine lokale, mobil-optimierte Weboberfläche (PWA) für einen eSCL-fähigen Netzwerk-Scanner. Sie startet Scans, zeigt den Fortschritt live an, blendet nach dem Scan kurz eine Vorschau ein, speichert eine lokale Kopie und übergibt diese an Paperless-ngx. Über eine geschützte REST-Schnittstelle kann Home Assistant Scans auslösen.
+**Dokument auf den Scanner legen, Handy zücken, Knopf drücken — fertig, es liegt in Paperless-ngx.**
+
+Kein PC hochfahren, keine Scan-Software, kein USB-Kabel, kein Umweg über den Download-Ordner. ScanDeck spricht direkt mit deinem Netzwerkscanner (HP, Brother, Canon, Epson — alles, was eSCL/AirScan kann) und schiebt das Ergebnis als PDF sofort in Paperless-ngx. Bedient wird es über eine Webseite, die auf dem Handy aussieht und sich anfühlt wie eine App — du kannst sie dir auf den Homescreen legen.
+
+Der Ablauf, den du danach hast: Post aufmachen, Blatt auf die Glasplatte, am Handy auf *Scan starten* tippen, kurz die Vorschau sehen — und das Dokument ist getaggt in Paperless. Das sind ein paar Sekunden statt einer kleinen Bastelrunde pro Brief.
+
+Und wenn es noch weniger sein soll: Über die Home-Assistant-Schnittstelle löst ein Taster, ein NFC-Tag oder ein Bewegungsmelder den Scan aus. Dann drückst du nicht mal mehr aufs Handy.
 
 | Dashboard | Scanvorgang |
 | --- | --- |
 | ![Dashboard](assets/mainpage.png) | ![Scanfortschritt](assets/scan.png) |
 
-## Starten
+## Loslegen
 
-```powershell
-docker compose up --build -d
+Das fertige Image liegt in der GitHub Container Registry, gebaut für `amd64` und `arm64` (läuft also auch auf dem Raspberry Pi). Nichts kompilieren, einfach ziehen.
+
+**Mit Docker Compose** — [`docker-compose.yaml`](docker-compose.yaml) herunterladen und starten:
+
+```bash
+docker compose up -d
 ```
 
-Danach im Browser öffnen: `http://localhost:8080`.
+**Oder mit einem einzelnen Befehl:**
 
-Beim ersten Start ist **nichts vorkonfiguriert** — es startet automatisch ein Einrichtungsassistent, der Scanner, Paperless-ngx, Ausgabeformat und Automatisierung abfragt. Erst danach ist das Dashboard nutzbar. Einstellungen landen in `./data/config.json`, Scans in `./scans`; beides sind Volumes.
+```bash
+docker run -d \
+  --name scandeck \
+  -p 8080:8080 \
+  -v ./data:/data \
+  -v ./scans:/scans \
+  --restart unless-stopped \
+  ghcr.io/dersumo/scandeck:latest
+```
 
-```powershell
+Dann `http://localhost:8080` im Browser öffnen (oder vom Handy aus die IP des Servers, z. B. `http://192.168.1.10:8080`).
+
+Beim ersten Start ist **nichts vorkonfiguriert** — es begrüßt dich ein Einrichtungsassistent, der den Scanner im Netzwerk sucht, nach Paperless-ngx fragt und Format sowie Tags festlegt. Danach ist Ruhe, du siehst nur noch den Scan-Knopf.
+
+Einstellungen landen in `./data/config.json`, die Scans in `./scans`. Beides sind Volumes und überleben ein Update.
+
+Aktualisieren und stoppen:
+
+```bash
+docker compose pull && docker compose up -d
 docker compose down
 ```
+
+Wer das Image lieber selbst baut, kommentiert in der `docker-compose.yaml` den `build:`-Block ein und startet mit `docker compose up -d --build`.
 
 ## Als App aufs Handy legen (PWA)
 
@@ -79,9 +108,11 @@ Der Upload verwendet `POST /api/documents/post_document/` mit Token-Authentifizi
 
 ## Versionierung
 
-ScanDeck folgt [Semantic Versioning](https://semver.org/lang/de/). Die maßgebliche Versionsnummer steht in der Datei `VERSION`; von dort liest sie die Anwendung ein und gibt sie unter `/health`, in `/api/config` und unten auf der Einstellungsseite aus. Alle Änderungen stehen im [CHANGELOG](CHANGELOG.md).
+ScanDeck folgt [Semantic Versioning](https://semver.org/lang/de/). Die maßgebliche Versionsnummer steht in der Datei `VERSION`; von dort liest sie die Anwendung ein und zeigt sie dezent neben dem Logo an. Alle Änderungen stehen im [CHANGELOG](CHANGELOG.md).
 
-Für eine neue Version: `VERSION` und den `APP_VERSION`-Build-Arg in `compose.yaml` anheben, den Changelog ergänzen, committen und taggen.
+Die App sieht einmal beim Start und danach alle sechs Stunden bei GitHub nach, ob es ein neueres Release gibt. Falls ja, färbt sich die Versionsanzeige neben dem Logo amber und bekommt einen kleinen Pfeil — ein Tipp darauf öffnet die Release-Seite. Unter *Einstellungen → Version* lässt sich sofort prüfen oder die Abfrage ganz abschalten; sie geht ausschließlich an `api.github.com` und sendet nichts über deine Installation.
+
+Für eine neue Version: `VERSION` anheben, den Changelog ergänzen, committen und taggen. Der Workflow [`docker-publish.yml`](.github/workflows/docker-publish.yml) baut daraufhin das Image für amd64 und arm64 und veröffentlicht es unter der neuen Versionsnummer — er bricht ab, wenn Tag und `VERSION` nicht zusammenpassen.
 
 ```powershell
 git tag -a v1.0.1 -m "ScanDeck 1.0.1"

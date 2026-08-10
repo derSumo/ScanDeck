@@ -121,7 +121,14 @@
 
     <!-- ───────────────────────── App shell ───────────────────────── -->
     <header class="appbar">
-      <div class="brand"><span class="logo-mark"></span><span class="brand-text">Scan<b>Deck</b></span></div>
+      <div class="brand">
+        <span class="logo-mark"></span>
+        <span class="brand-text">Scan<b>Deck</b></span>
+        <a id="version-chip" class="version-chip" href="#" target="_blank" rel="noopener" title="Version">
+          <svg class="update-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg>
+          <span id="version-chip-text">—</span>
+        </a>
+      </div>
       <div id="status-pill" class="status-pill ready"><i></i><span id="status-text">Bereit</span></div>
     </header>
 
@@ -254,13 +261,20 @@
           </details>
         </section>
 
+        <section class="card">
+          <div class="card-head"><h2>Version</h2><button id="update-check" class="btn tiny ghost" type="button">Jetzt prüfen</button></div>
+          <div class="about-row">
+            <div><b id="about-version">ScanDeck</b><span id="about-status" class="tile-sub">Version wird geladen …</span></div>
+            <a id="about-link" class="btn tiny" href="#" target="_blank" rel="noopener" hidden>Release ansehen</a>
+          </div>
+          <label class="switch"><input id="update-check-enabled" type="checkbox"><i></i><span>Täglich auf GitHub nach Updates sehen</span></label>
+        </section>
+
         <section class="card danger">
           <div class="card-head"><h2>Zurücksetzen</h2></div>
           <p class="hint">Löscht die gespeicherte Konfiguration und startet den Einrichtungsassistenten erneut.</p>
           <button id="reset-config" class="btn danger wide" type="button">Konfiguration löschen</button>
         </section>
-
-        <p class="version-line">ScanDeck <span id="app-version">—</span></p>
       </section>
     </main>
 

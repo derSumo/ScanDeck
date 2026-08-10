@@ -755,13 +755,56 @@ input[readonly] { color: var(--text-dim); }
 .wizard-foot .btn { flex: 1; }
 .wizard-foot .btn.ghost.hidden { visibility: hidden; }
 
-.version-line {
-  padding: 2px 0 6px;
-  text-align: center;
-  font-size: 11.5px;
-  letter-spacing: 0.06em;
+/* Version chip in the app bar: silent by default, amber once an update waits. */
+.version-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 2px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--text-faint);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  transition: color 0.3s, background 0.3s, border-color 0.3s;
 }
+.version-chip .update-arrow {
+  width: 0;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  transition: width 0.35s var(--ease), opacity 0.35s;
+}
+.version-chip.has-update {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(255, 176, 60, 0.32);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: update-nudge 3.2s var(--ease) 1s 3;
+}
+.version-chip.has-update .update-arrow { width: 11px; opacity: 1; }
+.version-chip.has-update:hover { background: rgba(255, 176, 60, 0.22); }
+
+@keyframes update-nudge {
+  0%, 88%, 100% { transform: none; }
+  92% { transform: translateY(-2px); }
+  96% { transform: translateY(0); }
+}
+
+.about-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.about-row b { display: block; font-size: 15px; }
+.about-row .tile-sub { display: block; }
+.about-row .btn[hidden] { display: none; }
 
 /* Toast ------------------------------------------------------------------- */
 .toast {

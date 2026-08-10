@@ -13,6 +13,18 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+### Hinzugefügt
+
+- Versionsanzeige neben dem Logo sowie eine Versionskarte in den Einstellungen.
+- Update-Hinweis: Die App fragt beim Start und danach alle sechs Stunden bei GitHub nach der neuesten Version. Liegt eine neuere vor, wird die Versionsanzeige hervorgehoben und verlinkt auf das Release. Abschaltbar über `update_check`.
+- GitHub-Actions-Workflow, der das Image für `linux/amd64` und `linux/arm64` baut und in die GitHub Container Registry veröffentlicht. Er bricht ab, wenn ein Tag nicht zur `VERSION`-Datei passt.
+- Fertiges Container-Image unter `ghcr.io/dersumo/scandeck`, dadurch ist kein lokaler Build mehr nötig.
+
+### Geändert
+
+- `compose.yaml` heißt jetzt `docker-compose.yaml` und zieht das veröffentlichte Image, statt lokal zu bauen. Der Build-Block bleibt auskommentiert erhalten.
+- README mit direkterem Einstieg und `docker run`-Variante.
+
 ## [1.0.0] - 2026-08-10
 
 Erste stabile Fassung.

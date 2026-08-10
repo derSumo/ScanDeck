@@ -275,7 +275,11 @@ function applyConfig(config) {
   setValue("ha-enabled", config.ha_enabled);
   setValue("ha-webhook-url", config.ha_webhook_url);
 
-  if (config.version) $("#app-version").textContent = `v${config.version}`;
+  if (config.version) {
+    $("#version-chip-text").textContent = `v${config.version}`;
+    $("#about-version").textContent = `ScanDeck ${config.version}`;
+  }
+  setValue("update-check-enabled", config.update_check);
 
   setSegment("output-format", config.output_format);
   setSegment("source", config.source);
@@ -307,6 +311,7 @@ function collectConfig() {
     output_format: getSegment("output-format", state.config.output_format),
     ha_enabled: getValue("ha-enabled"),
     ha_webhook_url: getValue("ha-webhook-url"),
+    update_check: getValue("update-check-enabled"),
   };
 }
 
@@ -328,6 +333,50 @@ async function loadConfig() {
   }
   if (!config.setup_complete) openWizard(config);
   return config;
+}
+
+/* --- update check -------------------------------------------------------- */
+
+async function checkForUpdate(force = false) {
+  const chip = $("#version-chip");
+  const link = $("#about-link");
+  const status = $("#about-status");
+  const releases = state.config.releases_url || "#";
+
+  try {
+    const info = await api(`/api/update${force ? "?force=1" : ""}`);
+    chip.href = info.url || releases;
+    link.href = info.url || releases;
+
+    if (info.disabled) {
+      status.textContent = "Update-Prüfung ist deaktiviert.";
+      chip.classList.remove("has-update");
+      link.hidden = true;
+      return info;
+    }
+    if (info.update_available) {
+      chip.classList.add("has-update");
+      $("#version-chip-text").textContent = info.latest;
+      status.textContent = `Version ${info.latest} ist verfügbar.`;
+      link.hidden = false;
+      if (force) toast(`Update ${info.latest} verfügbar`, "success");
+    } else {
+      chip.classList.remove("has-update");
+      $("#version-chip-text").textContent = `v${info.current}`;
+      status.textContent = info.error
+        ? "GitHub lieferte keine Versionsinfo."
+        : info.latest
+        ? "Aktuellste Version installiert."
+        : "Auf GitHub ist noch keine Version veröffentlicht.";
+      link.hidden = true;
+      if (force && !info.error) toast("Alles aktuell", "success");
+    }
+    return info;
+  } catch (error) {
+    status.textContent = "Update-Prüfung fehlgeschlagen.";
+    if (force) toast(error.message, "error");
+    return null;
+  }
 }
 
 /* --- navigation ---------------------------------------------------------- */
@@ -870,6 +919,17 @@ $("#ha-enabled").addEventListener("change", async () => {
   if (getValue("ha-enabled") && !getValue("ha-api-key")) await ensureHaKey("ha-api-key").catch(() => {});
 });
 
+$("#update-check").addEventListener("click", async () => {
+  const button = $("#update-check");
+  button.disabled = true;
+  try {
+    await saveSettings(false);
+    await checkForUpdate(true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $("#reset-config").addEventListener("click", async () => {
   if (!window.confirm("Konfiguration wirklich löschen und neu einrichten?")) return;
   try {
@@ -899,9 +959,13 @@ if (params.get("view") === "settings") activateView("settings");
 loadConfig()
   .then(async (config) => {
     await refreshState().catch(() => {});
+    checkForUpdate().catch(() => {});
     if (params.get("action") === "scan" && config.setup_complete) startScan();
   })
   .catch((error) => toast(error.message, "error"));
+
+// A long-lived PWA tab should still notice a release eventually.
+setInterval(() => checkForUpdate().catch(() => {}), 6 * 3600 * 1000);
 
 connectEvents();
 setInterval(() => refreshState().catch(() => {}), 4000);

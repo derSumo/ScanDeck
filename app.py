@@ -10,6 +10,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
@@ -42,6 +43,9 @@ def read_version() -> str:
 
 
 APP_VERSION = read_version()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "derSumo/ScanDeck")
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
+UPDATE_CACHE_SECONDS = 6 * 3600
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/data"))
 CONFIG_PATH = APP_DATA_DIR / "config.json"
 DEFAULT_OUTPUT_DIR = os.environ.get("SCAN_OUTPUT_DIR", "/scans")
@@ -68,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "upload_to_paperless": False,
     "title_prefix": "Scan",
     "preview_seconds": 10,
+    "update_check": True,
     "setup_complete": False,
     "ha_enabled": False,
     "ha_api_key": "",
@@ -220,6 +225,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["upload_to_paperless"] = bool(config.get("upload_to_paperless"))
     config["create_missing_tags"] = bool(config.get("create_missing_tags", True))
     config["title_prefix"] = str(config.get("title_prefix", "Scan")).strip() or "Scan"
+    config["update_check"] = bool(config.get("update_check"))
     config["setup_complete"] = bool(config.get("setup_complete"))
     config["ha_enabled"] = bool(config.get("ha_enabled"))
     config["ha_api_key"] = str(config.get("ha_api_key", "")).strip()
@@ -258,6 +264,67 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Standard-Tags müssen eine Liste sein.")
     config["default_tags"] = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
     return config
+
+
+def parse_version(value: str) -> tuple[int, ...]:
+    """Turn "v1.2.3" into (1, 2, 3); anything unparsable sorts lowest."""
+    core = re.split(r"[-+]", str(value or "").strip().lstrip("vV"), maxsplit=1)[0]
+    parts = [int(part) for part in re.findall(r"\d+", core)[:3]]
+    return tuple(parts + [0] * (3 - len(parts))) if parts else (0, 0, 0)
+
+
+update_cache: dict[str, Any] = {"checked_at": 0.0, "latest": "", "url": RELEASES_URL, "error": ""}
+update_lock = threading.Lock()
+
+
+def check_for_update(force: bool = False) -> dict[str, Any]:
+    """Ask GitHub for the newest release, at most once every few hours."""
+    with update_lock:
+        fresh = time.time() - update_cache["checked_at"] < UPDATE_CACHE_SECONDS
+        if not fresh or force:
+            headers = {"Accept": "application/vnd.github+json", "User-Agent": f"ScanDeck/{APP_VERSION}"}
+            try:
+                response = requests.get(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                    headers=headers,
+                    timeout=8,
+                )
+                if response.status_code == 404:
+                    # No published release yet: the newest semver tag is just as good.
+                    tags = requests.get(
+                        f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=100",
+                        headers=headers,
+                        timeout=8,
+                    )
+                    tags.raise_for_status()
+                    names = [str(tag.get("name", "")) for tag in tags.json()]
+                    newest = max(names, key=parse_version, default="")
+                    update_cache.update({
+                        "latest": newest.lstrip("vV"),
+                        "url": f"{RELEASES_URL}/tag/{newest}" if newest else RELEASES_URL,
+                        "error": "",
+                    })
+                else:
+                    response.raise_for_status()
+                    body = response.json()
+                    update_cache.update({
+                        "latest": str(body.get("tag_name") or body.get("name") or "").lstrip("vV"),
+                        "url": body.get("html_url") or RELEASES_URL,
+                        "error": "",
+                    })
+            except (requests.RequestException, ValueError) as error:
+                update_cache["error"] = str(error)
+            update_cache["checked_at"] = time.time()
+
+        latest = update_cache["latest"]
+        return {
+            "current": APP_VERSION,
+            "latest": latest,
+            "update_available": bool(latest) and parse_version(latest) > parse_version(APP_VERSION),
+            "url": update_cache["url"],
+            "checked_at": update_cache["checked_at"],
+            "error": update_cache["error"],
+        }
 
 
 def guess_local_subnet() -> str:
@@ -710,6 +777,7 @@ def get_config() -> Response:
     config = store.public()
     config["suggested_subnet"] = config.get("discovery_subnet") or guess_local_subnet()
     config["version"] = APP_VERSION
+    config["releases_url"] = RELEASES_URL
     return jsonify(config)
 
 
@@ -829,6 +897,20 @@ def stream_logs() -> Response:
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/update")
+def update_info() -> Response:
+    """Version banner data; never blocks the UI when GitHub is unreachable."""
+    if not store.get().get("update_check"):
+        return jsonify({
+            "current": APP_VERSION,
+            "latest": "",
+            "update_available": False,
+            "url": RELEASES_URL,
+            "disabled": True,
+        })
+    return jsonify(check_for_update(force=request.args.get("force") == "1"))
 
 
 @app.get("/health")
