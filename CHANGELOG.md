@@ -13,6 +13,17 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-10
+
+### Behoben
+
+- Das Stapel-Fenster verschwand nicht, wenn der Stapel ausgeschaltet wurde, und klappte sofort wieder auf. Ursache war eine eigene `display`-Regel, die das `hidden`-Attribut überstimmte; das galt ebenso für das eingeklappte Live-Protokoll und den Seitenzähler.
+- Auf dem iPhone öffnete das lange Drücken zum Verschieben zusätzlich Lupe, Textauswahl und Teilen-Menü. Auswahl und Kontextmenü sind auf den Seitenkacheln jetzt unterdrückt, und während des Ziehens wird das Mitscrollen ausdrücklich verhindert.
+
+### Hinzugefügt
+
+- ScanDeck misst die Dauer jedes Scans je Profil (Quelle, Auflösung, Farbmodus, Format) und speichert sie in `data/timings.json`. Ab dem zweiten Scan eines Profils läuft der Fortschrittsbalken in echter Zeit und die Anzeige nennt die verbleibenden Sekunden. Dauert ein Scan länger als gewohnt, kriecht der Balken weiter, statt stehen zu bleiben.
+
 ## [1.3.0] - 2026-08-10
 
 ### Hinzugefügt
@@ -82,7 +93,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/derSumo/ScanDeck/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/derSumo/ScanDeck/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/derSumo/ScanDeck/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/derSumo/ScanDeck/compare/v1.0.0...v1.1.0

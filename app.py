@@ -415,6 +415,61 @@ scanner_session.mount(
 )
 
 
+class TimingStore:
+    """Remembers how long a scan takes per profile so the bar can be honest.
+
+    A 600 dpi colour scan takes many times longer than 300 dpi grayscale, so one
+    average would be useless — every combination gets its own running mean.
+    """
+
+    SMOOTHING = 0.4  # weight of the newest measurement
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._data = self._load()
+
+    def _load(self) -> dict[str, dict[str, float]]:
+        try:
+            stored = json.loads(self.path.read_text(encoding="utf-8"))
+            return stored if isinstance(stored, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    @staticmethod
+    def key(config: dict[str, Any]) -> str:
+        return "|".join(str(config.get(field, "")) for field in
+                        ("source", "resolution", "color_mode", "output_format"))
+
+    def expected(self, key: str) -> float | None:
+        with self._lock:
+            entry = self._data.get(key)
+        # A single measurement can be an outlier (cold lamp, sleeping device).
+        return float(entry["seconds"]) if entry and entry.get("samples", 0) >= 1 else None
+
+    def record(self, key: str, seconds: float) -> None:
+        if seconds <= 0 or seconds > 3600:
+            return
+        with self._lock:
+            entry = self._data.get(key)
+            if entry:
+                entry["seconds"] = round(entry["seconds"] * (1 - self.SMOOTHING) + seconds * self.SMOOTHING, 2)
+                entry["samples"] = int(entry.get("samples", 1)) + 1
+            else:
+                entry = {"seconds": round(seconds, 2), "samples": 1}
+            self._data[key] = entry
+            snapshot = dict(self._data)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        except OSError:
+            pass  # a read-only volume must not break the scan itself
+
+    def summary(self) -> dict[str, dict[str, float]]:
+        with self._lock:
+            return dict(self._data)
+
+
 class ScannerClient:
     def __init__(self, config: dict[str, Any], log: LogHub) -> None:
         self.config = config
@@ -488,9 +543,14 @@ class ScannerClient:
         job_url = urljoin(f"{self.base_url}/", location)
         self.log.publish("ScanJob angenommen; warte auf das Dokument …", "success")
 
-        # The scanner streams for as long as the paper takes; ramp the bar so the
-        # UI keeps moving instead of freezing on a single number.
-        with progress_ramp(self.log, "capture", start=25, end=78):
+        # The scanner streams for as long as the paper takes. With a measured
+        # duration for this profile the bar tracks real time instead of guessing.
+        timing_key = TimingStore.key(self.config)
+        expected = timings.expected(timing_key)
+        if expected:
+            self.log.publish(f"Erwartete Dauer für dieses Profil: ~{expected:.0f}s")
+        capture_started = time.monotonic()
+        with progress_ramp(self.log, "capture", start=25, end=78, expected=expected):
             document = scanner_session.get(
                 f"{job_url.rstrip('/')}/NextDocument",
                 headers={"Accept": "image/jpeg, application/pdf, application/octet-stream"},
@@ -500,6 +560,7 @@ class ScannerClient:
             document.raise_for_status()
         if not document.content:
             raise RuntimeError("Der Scanner hat ein leeres Dokument geliefert.")
+        timings.record(timing_key, time.monotonic() - capture_started)
 
         self.log.progress("store", 82)
         content_type = document.headers.get("Content-Type", "").lower()
@@ -542,29 +603,56 @@ class ScannerClient:
 
 
 class progress_ramp:
-    """Context manager that eases the progress bar forward during a blocking call."""
+    """Eases the progress bar forward while a blocking call is in flight.
 
-    def __init__(self, log: LogHub, stage: str, start: int, end: int, step_seconds: float = 0.6) -> None:
+    With a measured duration for this scan profile the bar moves in real time and
+    can name the seconds left; without one it falls back to an asymptotic curve
+    that never quite arrives.
+    """
+
+    def __init__(
+        self,
+        log: LogHub,
+        stage: str,
+        start: int,
+        end: int,
+        expected: float | None = None,
+        step_seconds: float = 0.5,
+    ) -> None:
         self.log = log
         self.stage = stage
         self.start = start
         self.end = end
+        self.expected = expected if expected and expected > 0 else None
         self.step_seconds = step_seconds
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
 
     def __enter__(self) -> "progress_ramp":
-        self.log.progress(self.stage, self.start)
+        self.log.progress(self.stage, self.start, eta=round(self.expected) if self.expected else None)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
 
     def _run(self) -> None:
+        started = time.monotonic()
         current = float(self.start)
+        span = self.end - self.start
         while not self._done.wait(self.step_seconds):
-            # Asymptotic approach: fast at first, never quite reaching the end.
-            current += (self.end - current) * 0.12
-            self.log.progress(self.stage, round(current))
+            elapsed = time.monotonic() - started
+            if self.expected:
+                share = elapsed / self.expected
+                if share < 1:
+                    current = self.start + span * share
+                    eta = max(0, round(self.expected - elapsed))
+                else:
+                    # Slower than usual: creep on so the bar never looks stuck.
+                    current += (self.end - current) * 0.08
+                    eta = None
+            else:
+                current += (self.end - current) * 0.12
+                eta = None
+            self.log.progress(self.stage, round(min(current, self.end)), eta=eta)
 
     def __exit__(self, *_exc: object) -> None:
         self._done.set()
@@ -703,6 +791,7 @@ class PaperlessClient:
 app = Flask(__name__)
 logs = LogHub()
 store = ConfigStore(CONFIG_PATH)
+timings = TimingStore(APP_DATA_DIR / "timings.json")
 scan_lock = threading.Lock()
 scan_state: dict[str, Any] = {
     "running": False,

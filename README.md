@@ -152,6 +152,8 @@ Als Auslöser eignet sich alles, was Home Assistant kennt: Bewegungsmelder, Zigb
 
 Ein Scan besteht aus drei Anfragen an den Scanner: Status abfragen, Auftrag anlegen, Dokument abholen. ScanDeck hält die HTTPS-Verbindung dazwischen offen, statt sie dreimal neu aufzubauen — der TLS-Handshake fällt damit nur einmal an, und Drucker-Firmware ist beim Verschlüsseln meist ziemlich langsam. Wie lange ein Scan gebraucht hat, steht im Live-Protokoll hinter dem Dateinamen.
 
+ScanDeck merkt sich außerdem, wie lange dein Gerät für jede Kombination aus Quelle, Auflösung, Farbmodus und Format braucht, und speichert das in `./data/timings.json`. Ab dem zweiten Scan eines Profils läuft der Fortschrittsbalken deshalb in echter Zeit statt geschätzt, und die Anzeige nennt die verbleibenden Sekunden. Gemessen wird gleitend, langsame Ausreißer verziehen den Wert also nicht dauerhaft; dauert ein Scan länger als erwartet, kriecht der Balken weiter, statt stehen zu bleiben. Die Datei kann jederzeit gelöscht werden, dann lernt ScanDeck neu.
+
 Der Rest der Wartezeit ist der Scanner selbst: Lampe aufwärmen, Schlitten fahren, Bild übertragen. Zwei Stellschrauben helfen spürbar:
 
 - **Auflösung** — 600 dpi dauert grob viermal so lange wie 300 dpi und bringt bei normalem Papier nichts. Für Briefe reichen 200–300 dpi.

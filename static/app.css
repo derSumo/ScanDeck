@@ -28,6 +28,11 @@
 
 * { box-sizing: border-box; }
 
+/* Muss vor allen Komponenten stehen: eine eigene display-Regel (etwa
+   .card { display: flex }) schlaegt sonst das hidden-Attribut und das Element
+   bleibt sichtbar. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -267,7 +272,6 @@ body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: r
   font-variant-numeric: tabular-nums;
   animation: chip-in 0.32s var(--ease) both;
 }
-.batch-count[hidden] { display: none; }
 
 /* The panel unfolds instead of popping into place. */
 .batch-panel {
@@ -321,7 +325,6 @@ body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: r
   color: var(--text-dim);
   animation: help-in 0.34s var(--ease) both;
 }
-.batch-help[hidden] { display: none; }
 .batch-help ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
 .batch-help li { display: flex; align-items: baseline; gap: 8px; }
 .batch-help b { color: var(--text); font-weight: 620; }
@@ -360,8 +363,22 @@ body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: r
   touch-action: pan-y; /* long press starts the drag, a swipe still scrolls */
   cursor: grab;
   transition: transform 0.28s var(--ease), box-shadow 0.2s, opacity 0.2s;
+  /* Ohne das oeffnet iOS beim langen Druecken Lupe, Textauswahl und
+     Teilen-Menue statt den Zug zu starten. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
-.batch-page img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+.batch-page img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+  user-select: none;
+}
 
 /* Dragging ---------------------------------------------------------------- */
 .batch-page.dragging {
@@ -772,7 +789,6 @@ input[readonly] { color: var(--text-dim); }
   -webkit-backdrop-filter: blur(14px);
   animation: fade-in 0.3s var(--ease) both;
 }
-.overlay[hidden] { display: none; }
 .overlay.closing { animation: fade-out 0.28s var(--ease) both; }
 
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -904,7 +920,6 @@ input[readonly] { color: var(--text-dim); }
   background: radial-gradient(120% 90% at 50% 0%, #1a1e23, var(--bg) 62%);
   animation: fade-in 0.4s var(--ease) both;
 }
-.wizard[hidden] { display: none; }
 .wizard.closing { animation: fade-out 0.35s var(--ease) both; }
 
 .wizard-shell {
@@ -1025,7 +1040,6 @@ input[readonly] { color: var(--text-dim); }
 .about-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .about-row b { display: block; font-size: 15px; }
 .about-row .tile-sub { display: block; }
-.about-row .btn[hidden] { display: none; }
 
 /* Toast ------------------------------------------------------------------- */
 .toast {

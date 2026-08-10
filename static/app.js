@@ -41,6 +41,8 @@ const state = {
   running: false,
   batch: { active: false, pages: [], replace_index: null },
   progressTitle: "Scan läuft",
+  eta: null,
+  etaAt: 0,
   scanStart: 0,
   previewTimer: null,
   elapsedTimer: null,
@@ -367,6 +369,10 @@ function toolButton(kind, title, onClick) {
    Tiles swap in the DOM while dragging and are animated with a FLIP pass, so
    the grid stays correct no matter how many columns it has. */
 function makeDraggable(tile) {
+  // iOS shows its magnifier and share sheet on a long press; the drag needs
+  // that gesture, so the context menu is refused outright.
+  tile.addEventListener("contextmenu", (event) => event.preventDefault());
+
   tile.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 && event.pointerType === "mouse") return;
 
@@ -377,6 +383,13 @@ function makeDraggable(tile) {
     let offsetX = 0;
     let offsetY = 0;
 
+    // Safari keeps scrolling mid-gesture even with touch-action set, so the
+    // scroll is refused explicitly while a page is being dragged.
+    const blockScroll = (touchEvent) => {
+      if (dragging) touchEvent.preventDefault();
+    };
+    document.addEventListener("touchmove", blockScroll, { passive: false });
+
     // Touch needs a short hold so a normal swipe still scrolls the page.
     const holdTimer =
       event.pointerType === "touch" ? setTimeout(() => begin(), 180) : null;
@@ -384,6 +397,8 @@ function makeDraggable(tile) {
     function begin() {
       if (dragging) return;
       dragging = true;
+      // Drop any text selection iOS may have started during the hold.
+      window.getSelection?.()?.removeAllRanges?.();
       tile.setPointerCapture(event.pointerId);
       tile.classList.add("dragging");
       container.classList.add("reordering");
@@ -410,6 +425,7 @@ function makeDraggable(tile) {
 
     function finish() {
       if (holdTimer) clearTimeout(holdTimer);
+      document.removeEventListener("touchmove", blockScroll);
       tile.removeEventListener("pointermove", move);
       tile.removeEventListener("pointerup", finish);
       tile.removeEventListener("pointercancel", finish);
@@ -700,16 +716,27 @@ function setProgress(percent, stage) {
   }
 }
 
+function renderElapsed() {
+  const elapsed = Math.round((Date.now() - state.scanStart) / 1000);
+  // Count the estimate down between two events instead of letting it jump.
+  const remaining =
+    state.eta === null ? null : Math.max(0, state.eta - Math.round((Date.now() - state.etaAt) / 1000));
+  $("#progress-elapsed").textContent = remaining
+    ? `${elapsed} s · noch ca. ${remaining} s`
+    : `${elapsed} s`;
+}
+
 function showProgress() {
   const overlay = $("#progress-overlay");
   overlay.hidden = false;
   overlay.classList.remove("closing");
   $("#progress-title").textContent = state.progressTitle || "Scan läuft";
   state.scanStart = Date.now();
+  state.eta = null;
+  state.etaAt = 0;
   clearInterval(state.elapsedTimer);
-  state.elapsedTimer = setInterval(() => {
-    $("#progress-elapsed").textContent = `${Math.round((Date.now() - state.scanStart) / 1000)} s`;
-  }, 500);
+  state.elapsedTimer = setInterval(renderElapsed, 500);
+  renderElapsed();
 }
 
 function hideOverlay(overlay) {
@@ -821,6 +848,11 @@ function appendLog(event) {
 
 function handleProgress(event) {
   if (event.stage !== "done" && event.stage !== "error") setScanning(true);
+  if (event.eta !== undefined) {
+    state.eta = event.eta;
+    state.etaAt = Date.now();
+    renderElapsed();
+  }
   setProgress(event.progress, event.stage);
 
   if (event.stage === "done") {
