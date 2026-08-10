@@ -21,13 +21,22 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY VERSION app.py ./
 COPY templates ./templates
 COPY static ./static
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN useradd --create-home --uid 10001 scanner \
     && mkdir -p /data /scans \
-    && chown -R scanner:scanner /app /data /scans
+    && chown -R scanner:scanner /app /data /scans \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 
-USER scanner
+# Der Container startet als root, richtet die gemounteten Volumes ein und
+# wechselt im Entrypoint auf den unprivilegierten Benutzer "scanner".
+# Ueber PUID/PGID laesst sich dessen ID an den Host anpassen.
+ENV PUID=10001 \
+    PGID=10001
+
 EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4).status == 200 else 1)"

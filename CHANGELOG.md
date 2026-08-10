@@ -20,6 +20,11 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - GitHub-Actions-Workflow, der das Image für `linux/amd64` und `linux/arm64` baut und in die GitHub Container Registry veröffentlicht. Er bricht ab, wenn ein Tag nicht zur `VERSION`-Datei passt.
 - Fertiges Container-Image unter `ghcr.io/dersumo/scandeck`, dadurch ist kein lokaler Build mehr nötig.
 
+### Behoben
+
+- Der Container konnte in ein frisch gemountetes Volume nicht schreiben, weil dieses dem Host-root gehört, der Dienst aber unter UID 10001 läuft (`PermissionError: /data/config.json`). Ein Entrypoint richtet die Rechte jetzt beim Start ein und gibt die Privilegien danach wieder ab; über `PUID`/`PGID` lassen sich die IDs an den Host anpassen.
+- Schreibfehler beantworten die API mit einer verständlichen Meldung statt mit einem Stacktrace, und nicht beschreibbare Verzeichnisse werden schon beim Start im Containerlog gemeldet.
+
 ### Geändert
 
 - `compose.yaml` heißt jetzt `docker-compose.yaml` und zieht das veröffentlichte Image, statt lokal zu bauen. Der Build-Block bleibt auskommentiert erhalten.

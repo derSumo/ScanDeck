@@ -49,6 +49,26 @@ docker compose down
 
 Wer das Image lieber selbst baut, kommentiert in der `docker-compose.yaml` den `build:`-Block ein und startet mit `docker compose up -d --build`.
 
+### Dateirechte
+
+Darum musst du dich normalerweise nicht kümmern: Der Container startet als root, setzt die Rechte der gemounteten Ordner `./data` und `./scans` einmalig zurecht und gibt die Privilegien dann ab — der Dienst selbst läuft unprivilegiert als UID 10001.
+
+Sollen die Dateien einem bestimmten Host-Benutzer gehören, dessen IDs setzen (auf dem Host mit `id -u` und `id -g` ablesen):
+
+```yaml
+environment:
+  PUID: 1000
+  PGID: 1000
+```
+
+Wenn der Container per `user:` in der Compose-Datei ohne root-Rechte gestartet wird, kann er die Ordner nicht selbst korrigieren. Dann muss das einmal auf dem Host passieren:
+
+```bash
+sudo chown -R 1000:1000 ./data ./scans
+```
+
+Fehlen die Rechte, sagt ScanDeck das beim Start im Containerlog und beim Speichern als Fehlermeldung in der Oberfläche.
+
 ## Als App aufs Handy legen (PWA)
 
 Die Oberfläche ist installierbar: In Chrome/Android über *Zum Startbildschirm hinzufügen*, in Safari/iOS über *Teilen → Zum Home-Bildschirm*. Sie läuft dann im Vollbild ohne Browserleiste, respektiert die Safe-Area und funktioniert offline so weit, dass die Oberfläche lädt (Scans brauchen natürlich das Netzwerk). Schnellaktionen im App-Icon: *Sofort scannen* und *Einstellungen*.

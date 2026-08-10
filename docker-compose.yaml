@@ -7,6 +7,11 @@ services:
     environment:
       APP_DATA_DIR: /data
       SCAN_OUTPUT_DIR: /scans
+      # Der Container richtet die Rechte der gemounteten Ordner beim Start
+      # selbst ein. Sollen die Dateien einem bestimmten Host-Benutzer gehoeren,
+      # dessen IDs hier eintragen (auf dem Host mit "id -u" / "id -g" ablesen).
+      # PUID: 1000
+      # PGID: 1000
       # Nothing is preconfigured: the first start opens the setup wizard and
       # persists everything to ./data/config.json. These optional variables only
       # prefill the wizard for an unattended rollout.

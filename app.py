@@ -9,6 +9,7 @@ import queue
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -625,6 +626,26 @@ scan_state: dict[str, Any] = {
 preview_cache: dict[str, Any] = {"path": None, "image": None}
 
 
+def check_writable(directory: Path, label: str) -> None:
+    """Report an unwritable volume at boot instead of at the first save."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".scandeck-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as error:
+        message = (
+            f"{label} ({directory}) ist nicht beschreibbar: {error.strerror or error}. "
+            "Bitte die Rechte des gemounteten Ordners pruefen oder PUID/PGID setzen."
+        )
+        logs.publish(message, "error")
+        print(f"ScanDeck: {message}", file=sys.stderr, flush=True)
+
+
+check_writable(APP_DATA_DIR, "Konfigurationsverzeichnis")
+check_writable(Path(store.get()["output_dir"]), "Scan-Ablage")
+
+
 # --------------------------------------------------------------------------- #
 # Scan workflow
 # --------------------------------------------------------------------------- #
@@ -781,6 +802,17 @@ def get_config() -> Response:
     return jsonify(config)
 
 
+def storage_error(error: OSError, target: Path) -> tuple[Response, int]:
+    """Turn a bare PermissionError into something a user can act on."""
+    message = (
+        f"{target} ist nicht beschreibbar ({error.strerror or error}). "
+        "Der Ordner gehoert vermutlich einem anderen Benutzer als dem Dienst — "
+        "Container neu starten oder PUID/PGID passend zum Host setzen."
+    )
+    logs.publish(message, "error")
+    return jsonify({"error": message}), 500
+
+
 @app.put("/api/config")
 def put_config() -> Response:
     try:
@@ -789,6 +821,8 @@ def put_config() -> Response:
         return jsonify(config)
     except (TypeError, ValueError) as error:
         return jsonify({"error": str(error)}), 400
+    except OSError as error:
+        return storage_error(error, Path(getattr(error, "filename", None) or CONFIG_PATH))
 
 
 @app.post("/api/setup/complete")
@@ -802,6 +836,8 @@ def complete_setup() -> Response:
         return jsonify(config)
     except (TypeError, ValueError) as error:
         return jsonify({"error": str(error)}), 400
+    except OSError as error:
+        return storage_error(error, Path(getattr(error, "filename", None) or CONFIG_PATH))
 
 
 @app.post("/api/setup/reset")
