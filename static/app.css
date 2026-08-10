@@ -269,8 +269,74 @@ body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: r
 }
 .batch-count[hidden] { display: none; }
 
-.batch-panel { animation: view-in 0.36s var(--ease) both; }
-.batch-hint { font-size: 11.5px; color: var(--accent); }
+/* The panel unfolds instead of popping into place. */
+.batch-panel {
+  overflow: hidden;
+  animation: panel-open 0.44s var(--ease) both;
+}
+.batch-panel.closing { animation: panel-close 0.3s var(--ease) both; }
+
+@keyframes panel-open {
+  from { opacity: 0; transform: translateY(-10px) scaleY(0.94); max-height: 0; padding-top: 0; padding-bottom: 0; margin-top: -10px; }
+  to { opacity: 1; transform: none; max-height: 1200px; }
+}
+@keyframes panel-close {
+  from { opacity: 1; max-height: 1200px; }
+  to { opacity: 0; transform: translateY(-8px) scaleY(0.95); max-height: 0; padding-top: 0; padding-bottom: 0; margin-top: -10px; }
+}
+
+.batch-panel .card-head h2 { display: flex; align-items: center; gap: 7px; }
+.batch-hint { font-size: 11.5px; color: var(--accent); text-align: right; }
+
+.help-dot {
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.3s var(--ease);
+}
+.help-dot:hover, .help-dot[aria-expanded="true"] {
+  color: var(--accent);
+  border-color: rgba(255, 176, 60, 0.5);
+  background: var(--accent-soft);
+}
+.help-dot[aria-expanded="true"] { transform: rotate(180deg); }
+
+.batch-help {
+  display: grid;
+  gap: 9px;
+  padding: 13px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  animation: help-in 0.34s var(--ease) both;
+}
+.batch-help[hidden] { display: none; }
+.batch-help ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.batch-help li { display: flex; align-items: baseline; gap: 8px; }
+.batch-help b { color: var(--text); font-weight: 620; }
+.help-icon {
+  flex: none;
+  width: 20px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+@keyframes help-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
 
 .batch-pages {
   display: grid;
@@ -291,8 +357,24 @@ body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: r
   background: #0b0d0f;
   aspect-ratio: 3 / 4;
   animation: chip-in 0.34s var(--ease) both;
+  touch-action: pan-y; /* long press starts the drag, a swipe still scrolls */
+  cursor: grab;
+  transition: transform 0.28s var(--ease), box-shadow 0.2s, opacity 0.2s;
 }
-.batch-page img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.batch-page img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+
+/* Dragging ---------------------------------------------------------------- */
+.batch-page.dragging {
+  z-index: 5;
+  cursor: grabbing;
+  transition: none;
+  transform: scale(1.06);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.6);
+  border-color: var(--accent);
+  opacity: 0.96;
+}
+.batch-pages.reordering .batch-page:not(.dragging) { opacity: 0.72; }
+body.dragging-page { user-select: none; -webkit-user-select: none; }
 .batch-page.armed { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(255, 176, 60, 0.28); }
 .batch-page.armed::after {
   content: "wird ersetzt";
@@ -322,20 +404,41 @@ body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: r
 }
 .batch-page .page-tools { position: absolute; top: 5px; right: 5px; display: grid; gap: 4px; }
 .batch-page .page-tools button {
-  width: 22px;
-  height: 22px;
+  width: 23px;
+  height: 23px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 6px;
-  background: rgba(11, 13, 15, 0.82);
+  border-radius: 7px;
+  background: rgba(11, 13, 15, 0.84);
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s;
+  transition: background 0.2s, color 0.2s, transform 0.2s var(--ease);
 }
+.batch-page .page-tools button:active { transform: scale(0.9); }
 .batch-page .page-tools button:hover { background: var(--accent); color: #191203; }
 .batch-page .page-tools .remove:hover { background: var(--err); color: #fff; }
+.batch-page .page-tools svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+.batch-page .grip {
+  position: absolute;
+  left: 5px;
+  bottom: 5px;
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: rgba(11, 13, 15, 0.72);
+  color: var(--text-faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+/* Steps: the upload block disappears while a batch is being collected. */
+.steps.no-upload li[data-optional="upload"] {
+  display: none;
+}
 
 .batch-actions { display: flex; gap: 8px; }
 .batch-actions .btn { flex: 1; }

@@ -340,6 +340,156 @@ async function loadConfig() {
 
 /* --- batch mode ---------------------------------------------------------- */
 
+const TOOL_ICONS = {
+  // Rotate clockwise, rescan, discard.
+  rotate: '<path d="M20 8a8 8 0 1 0 1.5 6"/><path d="M20 3v5h-5"/>',
+  replace: '<path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3"/><circle cx="12" cy="12" r="3.2"/>',
+  remove: '<path d="M6 6l12 12M18 6L6 18"/>',
+};
+
+function toolButton(kind, title, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = kind;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${TOOL_ICONS[kind]}</svg>`;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  // Never let a tap on a button start a drag.
+  button.addEventListener("pointerdown", (event) => event.stopPropagation());
+  return button;
+}
+
+/* Drag to reorder — one implementation for mouse and touch via pointer events.
+   Tiles swap in the DOM while dragging and are animated with a FLIP pass, so
+   the grid stays correct no matter how many columns it has. */
+function makeDraggable(tile) {
+  tile.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 && event.pointerType === "mouse") return;
+
+    const container = tile.parentElement;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    // Touch needs a short hold so a normal swipe still scrolls the page.
+    const holdTimer =
+      event.pointerType === "touch" ? setTimeout(() => begin(), 180) : null;
+
+    function begin() {
+      if (dragging) return;
+      dragging = true;
+      tile.setPointerCapture(event.pointerId);
+      tile.classList.add("dragging");
+      container.classList.add("reordering");
+      document.body.classList.add("dragging-page");
+      if (navigator.vibrate) navigator.vibrate(8);
+    }
+
+    function move(moveEvent) {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      if (!dragging) {
+        if (event.pointerType === "touch") return; // waiting for the hold
+        if (Math.hypot(dx, dy) < 6) return; // mouse: ignore a plain click
+        begin();
+      }
+      moveEvent.preventDefault();
+      offsetX = dx;
+      offsetY = dy;
+      tile.style.transform = `translate(${dx}px, ${dy}px) scale(1.06)`;
+
+      const target = tileUnderPointer(container, tile, moveEvent.clientX, moveEvent.clientY);
+      if (target) reinsert(container, tile, target, () => (tile.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(1.06)`));
+    }
+
+    function finish() {
+      if (holdTimer) clearTimeout(holdTimer);
+      tile.removeEventListener("pointermove", move);
+      tile.removeEventListener("pointerup", finish);
+      tile.removeEventListener("pointercancel", finish);
+      if (!dragging) return;
+      tile.classList.remove("dragging");
+      container.classList.remove("reordering");
+      document.body.classList.remove("dragging-page");
+      tile.style.transform = "";
+      persistOrder(container);
+    }
+
+    tile.addEventListener("pointermove", move);
+    tile.addEventListener("pointerup", finish);
+    tile.addEventListener("pointercancel", finish);
+  });
+}
+
+function tileUnderPointer(container, dragged, x, y) {
+  return (
+    Array.from(container.children).find((child) => {
+      if (child === dragged) return false;
+      const box = child.getBoundingClientRect();
+      return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+    }) || null
+  );
+}
+
+function reinsert(container, dragged, target, restoreDragTransform) {
+  const siblings = Array.from(container.children);
+  const from = siblings.indexOf(dragged);
+  const to = siblings.indexOf(target);
+
+  // FLIP: remember where everything sits, move the node, animate the delta.
+  const before = new Map(siblings.map((child) => [child, child.getBoundingClientRect()]));
+  container.insertBefore(dragged, from < to ? target.nextSibling : target);
+
+  siblings.forEach((child) => {
+    if (child === dragged) return;
+    const start = before.get(child);
+    const now = child.getBoundingClientRect();
+    const dx = start.left - now.left;
+    const dy = start.top - now.top;
+    if (!dx && !dy) return;
+    child.style.transition = "none";
+    child.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => {
+      child.style.transition = "";
+      child.style.transform = "";
+    });
+  });
+  restoreDragTransform();
+  renumber(container);
+}
+
+function renumber(container) {
+  Array.from(container.children).forEach((tile, position) => {
+    tile.querySelector(".page-number").textContent = String(position + 1);
+  });
+}
+
+async function persistOrder(container) {
+  const order = Array.from(container.children).map((tile) => Number(tile.dataset.index));
+  if (order.every((value, position) => value === position)) return;
+  try {
+    renderBatch(await api("/api/batch/order", { method: "POST", body: JSON.stringify({ order }) }));
+    toast("Reihenfolge gespeichert");
+  } catch (error) {
+    toast(error.message, "error");
+    loadBatch().catch(() => {});
+  }
+}
+
+async function rotatePage(index) {
+  try {
+    renderBatch(await api(`/api/batch/page/${index}/rotate`, { method: "POST", body: JSON.stringify({ degrees: 90 }) }));
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 function renderBatch(batch) {
   state.batch = batch;
   const pages = batch.pages || [];
@@ -347,7 +497,9 @@ function renderBatch(batch) {
 
   document.body.classList.toggle("batch-on", batch.active);
   setValue("batch-toggle", batch.active);
-  $("#batch-panel").hidden = !batch.active;
+  togglePanel(batch.active);
+  // While collecting pages nothing is uploaded, so that step is not shown.
+  $("#progress-steps").classList.toggle("no-upload", batch.active);
   $("#batch-count").hidden = !batch.active || pages.length === 0;
   $("#batch-count").textContent = String(pages.length);
   $("#batch-finish").disabled = pages.length === 0;
@@ -364,36 +516,35 @@ function renderBatch(batch) {
   pages.forEach((page, index) => {
     const tile = document.createElement("div");
     tile.className = `batch-page${index === armed ? " armed" : ""}`;
+    tile.dataset.index = String(index);
 
     const image = document.createElement("img");
-    image.src = `/api/batch/page/${index}/preview?v=${encodeURIComponent(page.name)}`;
+    // The rotation belongs in the URL so a turned page reloads its preview.
+    image.src = `/api/batch/page/${index}/preview?v=${encodeURIComponent(page.name)}&r=${page.rotation || 0}`;
     image.alt = `Seite ${index + 1}`;
     image.loading = "lazy";
+    image.draggable = false;
 
     const number = document.createElement("span");
     number.className = "page-number";
     number.textContent = String(index + 1);
 
+    const grip = document.createElement("span");
+    grip.className = "grip";
+    grip.textContent = "⠿";
+
     const tools = document.createElement("div");
     tools.className = "page-tools";
+    tools.append(
+      toolButton("rotate", "Seite um 90° drehen", () => rotatePage(index)),
+      toolButton("replace", index === armed ? "Ersetzen abbrechen" : "Diese Seite neu scannen", () =>
+        armReplace(index === armed ? null : index)
+      ),
+      toolButton("remove", `Seite ${index + 1} entfernen`, () => removePage(index))
+    );
 
-    const replace = document.createElement("button");
-    replace.type = "button";
-    replace.textContent = "⟳";
-    replace.title = index === armed ? "Ersetzen abbrechen" : "Diese Seite neu scannen";
-    replace.setAttribute("aria-label", replace.title);
-    replace.addEventListener("click", () => armReplace(index === armed ? null : index));
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "remove";
-    remove.textContent = "×";
-    remove.title = "Seite entfernen";
-    remove.setAttribute("aria-label", `Seite ${index + 1} entfernen`);
-    remove.addEventListener("click", () => removePage(index));
-
-    tools.append(replace, remove);
-    tile.append(image, number, tools);
+    tile.append(image, number, grip, tools);
+    makeDraggable(tile);
     container.append(tile);
   });
 
@@ -407,6 +558,24 @@ function renderBatch(batch) {
       ? "Erste Seite scannen"
       : "Seite hinzufügen"
     : "Scan starten";
+}
+
+function togglePanel(open) {
+  const panel = $("#batch-panel");
+  if (open) {
+    clearTimeout(togglePanel.timer);
+    panel.classList.remove("closing");
+    panel.hidden = false;
+    return;
+  }
+  if (panel.hidden) return;
+  panel.classList.add("closing");
+  togglePanel.timer = setTimeout(() => {
+    panel.hidden = true;
+    panel.classList.remove("closing");
+    $("#batch-help").hidden = true;
+    $("#batch-help-toggle").setAttribute("aria-expanded", "false");
+  }, 290);
 }
 
 async function loadBatch() {
@@ -1004,6 +1173,12 @@ bindDiscovery("wiz-discover", "wiz-subnet", "wiz-devices", "wiz-scanner-url", tr
 bindDiscovery("wiz-discover-manual", "wiz-subnet", "wiz-devices", "wiz-scanner-url", false);
 
 $("#batch-toggle").addEventListener("change", toggleBatch);
+$("#batch-help-toggle").addEventListener("click", () => {
+  const help = $("#batch-help");
+  const open = help.hidden;
+  help.hidden = !open;
+  $("#batch-help-toggle").setAttribute("aria-expanded", String(open));
+});
 $("#batch-finish").addEventListener("click", finishBatch);
 $("#batch-cancel").addEventListener("click", async () => {
   if ((state.batch?.pages || []).length && !window.confirm("Gesammelte Seiten verwerfen?")) return;

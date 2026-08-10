@@ -400,6 +400,21 @@ def candidate_subnets(config: dict[str, Any], client_address: str | None = None)
     return candidates + fallbacks
 
 
+# One session for every talk to the scanner. Each scan needs three requests
+# (status, job, document) and HTTPS costs a full TLS handshake per connection —
+# keeping it alive saves that handshake within a scan and between scans.
+scanner_session = requests.Session()
+scanner_session.headers.update({"User-Agent": f"ScanDeck/{APP_VERSION}", "Connection": "keep-alive"})
+scanner_session.mount(
+    "https://",
+    requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0),
+)
+scanner_session.mount(
+    "http://",
+    requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0),
+)
+
+
 class ScannerClient:
     def __init__(self, config: dict[str, Any], log: LogHub) -> None:
         self.config = config
@@ -416,7 +431,7 @@ class ScannerClient:
         return url
 
     def _get(self, endpoint: str, timeout: int = 20) -> requests.Response:
-        return requests.get(
+        return scanner_session.get(
             f"{self.base_url}/eSCL/{endpoint}",
             verify=self.verify_ssl,
             timeout=timeout,
@@ -448,6 +463,7 @@ class ScannerClient:
 
     def scan(self) -> Path:
         settings = self._build_settings()
+        started = time.monotonic()
         self.log.progress("connect", 8)
         status = self.status()
         self.log.publish(f"Scannerstatus: {status}")
@@ -456,7 +472,7 @@ class ScannerClient:
 
         self.log.progress("job", 18)
         self.log.publish(f"Starte {self.config['source']}-Scan mit {self.config['resolution']} dpi …")
-        response = requests.post(
+        response = scanner_session.post(
             f"{self.base_url}/eSCL/ScanJobs",
             data=settings.encode("utf-8"),
             headers={"Content-Type": "text/xml", "Accept": "*/*"},
@@ -475,7 +491,7 @@ class ScannerClient:
         # The scanner streams for as long as the paper takes; ramp the bar so the
         # UI keeps moving instead of freezing on a single number.
         with progress_ramp(self.log, "capture", start=25, end=78):
-            document = requests.get(
+            document = scanner_session.get(
                 f"{job_url.rstrip('/')}/NextDocument",
                 headers={"Accept": "image/jpeg, application/pdf, application/octet-stream"},
                 verify=self.verify_ssl,
@@ -493,7 +509,11 @@ class ScannerClient:
         output_dir.mkdir(parents=True, exist_ok=True)
         target = output_dir / f"scan_{timestamp}{extension}"
         target.write_bytes(document.content)
-        self.log.publish(f"Scan gespeichert: {target.name} ({len(document.content):,} Bytes)", "success")
+        self.log.publish(
+            f"Scan gespeichert: {target.name} ({len(document.content):,} Bytes, "
+            f"{time.monotonic() - started:.1f}s)",
+            "success",
+        )
         return target
 
     def _build_settings(self) -> str:
@@ -695,7 +715,7 @@ scan_state: dict[str, Any] = {
     "last_error": None,
     "trigger": None,
 }
-preview_cache: dict[str, Any] = {"path": None, "image": None}
+preview_cache: dict[str, Any] = {"path": None, "image": None, "mimetype": "image/png"}
 # Pages collected for a multi-document scan; "replace_index" arms the next scan
 # to overwrite one page instead of appending.
 batch_state: dict[str, Any] = {"active": False, "pages": [], "replace_index": None}
@@ -732,7 +752,12 @@ def batch_public() -> dict[str, Any]:
             "active": batch_state["active"],
             "replace_index": batch_state["replace_index"],
             "pages": [
-                {"index": index, "name": page["name"], "kind": page["kind"]}
+                {
+                    "index": index,
+                    "name": page["name"],
+                    "kind": page["kind"],
+                    "rotation": page.get("rotation", 0),
+                }
                 for index, page in enumerate(batch_state["pages"])
             ],
         }
@@ -759,6 +784,7 @@ def batch_store(source: Path) -> int:
         "name": target.name,
         "path": str(target),
         "kind": "pdf" if target.suffix.lower() == ".pdf" else "image",
+        "rotation": 0,
     }
     with batch_lock:
         index = batch_state["replace_index"]
@@ -776,16 +802,34 @@ def batch_store(source: Path) -> int:
         return len(batch_state["pages"]) - 1
 
 
-def as_pdf_document(path: Path) -> "pypdfium2.PdfDocument":
+def as_pdf_document(path: Path, rotation: int = 0) -> "pypdfium2.PdfDocument":
     """Every page becomes a PDF so the merge only has to deal with one format."""
     import pypdfium2
     from PIL import Image
 
+    rotation = normalise_rotation(rotation)
     if path.suffix.lower() == ".pdf":
-        return pypdfium2.PdfDocument(str(path))
+        document = pypdfium2.PdfDocument(str(path))
+        if rotation:
+            for index in range(len(document)):
+                page = document[index]
+                page.set_rotation((page.get_rotation() + rotation) % 360)
+        return document
+
+    image = Image.open(path).convert("RGB")
+    if rotation:
+        # PIL turns counter-clockwise, the UI promises clockwise.
+        image = image.rotate(-rotation, expand=True)
     buffer = io.BytesIO()
-    Image.open(path).convert("RGB").save(buffer, "PDF", resolution=200.0)
+    image.save(buffer, "PDF", resolution=200.0)
     return pypdfium2.PdfDocument(buffer.getvalue())
+
+
+def normalise_rotation(degrees: Any) -> int:
+    try:
+        return int(degrees) % 360 // 90 * 90
+    except (TypeError, ValueError):
+        return 0
 
 
 def merge_batch(pages: list[dict[str, Any]], target: Path) -> int:
@@ -796,7 +840,7 @@ def merge_batch(pages: list[dict[str, Any]], target: Path) -> int:
     sources = []
     try:
         for page in pages:
-            document = as_pdf_document(Path(page["path"]))
+            document = as_pdf_document(Path(page["path"]), page.get("rotation", 0))
             sources.append(document)
             merged.import_pages(document)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -949,14 +993,24 @@ def notify_home_assistant(config: dict[str, Any], status: str, filename: str | N
 # Preview rendering
 # --------------------------------------------------------------------------- #
 
-def render_preview(file_path: Path) -> tuple[bytes, str]:
-    """Return displayable image bytes for the last scan (first page for PDFs)."""
-    if preview_cache["path"] == str(file_path) and preview_cache["image"]:
-        return preview_cache["image"], "image/png" if file_path.suffix.lower() == ".pdf" else "image/jpeg"
+def render_preview(file_path: Path, rotation: int = 0) -> tuple[bytes, str]:
+    """Return displayable image bytes for a scan (first page for PDFs)."""
+    rotation = normalise_rotation(rotation)
+    cache_key = (str(file_path), rotation)
+    if preview_cache["path"] == cache_key and preview_cache["image"]:
+        return preview_cache["image"], preview_cache["mimetype"]
 
     if file_path.suffix.lower() != ".pdf":
-        payload = file_path.read_bytes()
-        preview_cache.update({"path": str(file_path), "image": payload})
+        if not rotation:
+            payload = file_path.read_bytes()
+            preview_cache.update({"path": cache_key, "image": payload, "mimetype": "image/jpeg"})
+            return payload, "image/jpeg"
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.open(file_path).convert("RGB").rotate(-rotation, expand=True).save(buffer, "JPEG", quality=88)
+        payload = buffer.getvalue()
+        preview_cache.update({"path": cache_key, "image": payload, "mimetype": "image/jpeg"})
         return payload, "image/jpeg"
 
     try:
@@ -964,13 +1018,16 @@ def render_preview(file_path: Path) -> tuple[bytes, str]:
 
         pdf = pypdfium2.PdfDocument(str(file_path))
         try:
-            bitmap = pdf[0].render(scale=1.4)
+            page = pdf[0]
+            if rotation:
+                page.set_rotation((page.get_rotation() + rotation) % 360)
+            bitmap = page.render(scale=1.4)
             buffer = io.BytesIO()
             bitmap.to_pil().save(buffer, format="PNG", optimize=True)
         finally:
             pdf.close()
         payload = buffer.getvalue()
-        preview_cache.update({"path": str(file_path), "image": payload})
+        preview_cache.update({"path": cache_key, "image": payload, "mimetype": "image/png"})
         return payload, "image/png"
     except Exception as error:  # missing wheel or broken PDF: fall back to the file
         logs.publish(f"PDF-Vorschau nicht gerendert ({error}); zeige Originaldatei.", "warning")
@@ -1193,10 +1250,39 @@ def batch_page_preview(index: int) -> Response:
     if not path.exists():
         return jsonify({"error": "Seite nicht mehr vorhanden."}), 404
     try:
-        payload, mimetype = render_preview(path)
+        payload, mimetype = render_preview(path, page.get("rotation", 0))
     except Exception:
         return send_file(path, mimetype="application/pdf", max_age=0)
     return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/batch/page/<int:index>/rotate")
+def rotate_batch_page(index: int) -> Response:
+    """Turn a single page; the rotation is applied when the batch is merged."""
+    degrees = normalise_rotation((request.get_json(silent=True) or {}).get("degrees", 90)) or 90
+    with batch_lock:
+        if not 0 <= index < len(batch_state["pages"]):
+            return jsonify({"error": "Diese Seite gibt es nicht."}), 404
+        page = batch_state["pages"][index]
+        page["rotation"] = (page.get("rotation", 0) + degrees) % 360
+    return jsonify(batch_public())
+
+
+@app.post("/api/batch/order")
+def reorder_batch() -> Response:
+    """Apply a new page order, e.g. after dragging a page to another slot."""
+    order = (request.get_json(silent=True) or {}).get("order")
+    with batch_lock:
+        pages = batch_state["pages"]
+        if not isinstance(order, list) or sorted(order) != list(range(len(pages))):
+            return jsonify({"error": "Die Reihenfolge passt nicht zum Stapel."}), 400
+        armed = batch_state["replace_index"]
+        batch_state["pages"] = [pages[position] for position in order]
+        if armed is not None:
+            # Keep the armed page armed, even though it sits somewhere else now.
+            batch_state["replace_index"] = order.index(armed) if armed in order else None
+    logs.publish("Reihenfolge im Stapel geändert.")
+    return jsonify(batch_public())
 
 
 @app.post("/api/batch/finish")

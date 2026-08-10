@@ -167,9 +167,21 @@
 
         <section id="batch-panel" class="card batch-panel" hidden>
           <div class="card-head">
-            <h2>Seiten im Stapel</h2>
+            <h2>Seiten im Stapel <button id="batch-help-toggle" class="help-dot" type="button" aria-label="Wie funktioniert der Stapel?" aria-expanded="false">?</button></h2>
             <span id="batch-hint" class="batch-hint">Scanne die erste Seite</span>
           </div>
+
+          <div id="batch-help" class="batch-help" hidden>
+            <p>Jeder Scan wird als Seite gesammelt statt sofort hochgeladen. Am Ende entsteht daraus <b>ein</b> PDF.</p>
+            <ul>
+              <li><span class="help-icon">⠿</span> <b>Ziehen</b> — Seite gedrückt halten und an die richtige Stelle schieben.</li>
+              <li><span class="help-icon">↻</span> <b>Drehen</b> — dreht die Seite um 90°, so wie sie später im PDF liegt.</li>
+              <li><span class="help-icon">⟳</span> <b>Neu scannen</b> — der nächste Scan ersetzt genau diese Seite.</li>
+              <li><span class="help-icon">×</span> <b>Entfernen</b> — wirft die Seite aus dem Stapel.</li>
+            </ul>
+            <p><b>Als PDF ablegen</b> führt alles zusammen und schickt es an Paperless. <b>Verwerfen</b> löscht den Stapel.</p>
+          </div>
+
           <div id="batch-pages" class="batch-pages"></div>
           <div class="batch-actions">
             <button id="batch-cancel" class="btn ghost" type="button">Verwerfen</button>
@@ -332,7 +344,7 @@
           <li data-stage="connect">Verbindung</li>
           <li data-stage="capture">Erfassen</li>
           <li data-stage="store">Speichern</li>
-          <li data-stage="upload">Upload</li>
+          <li data-stage="upload" data-optional="upload">Upload</li>
         </ol>
       </div>
     </div>

@@ -89,10 +89,14 @@ Während des Scans erscheint eine Fortschrittsanzeige mit Prozentwert, Laufzeit 
 
 Für alles, was länger als ein Blatt ist: Auf dem Dashboard den Schalter **Stapel** umlegen. Ab dann landet jeder Scan als Seite im Stapel statt sofort in Paperless. Du scannst also Blatt für Blatt, siehst die Seiten als Vorschaubilder untereinander und drückst am Ende **Als PDF ablegen** — daraus wird ein einziges Dokument, das als Ganzes hochgeladen wird.
 
-Jede Seitenkachel hat zwei Knöpfe:
+Was du mit einer einzelnen Seite machen kannst — das Fragezeichen neben der Überschrift erklärt es auch in der App:
 
-- **⟳ Ersetzen** — markiert die Seite; der nächste Scan tauscht genau diese Seite 1:1 aus, die Reihenfolge bleibt. Praktisch, wenn ein Blatt schief lag. Nochmal drücken bricht ab.
+- **Ziehen** — Seite antippen, kurz halten und an die richtige Stelle schieben. Falls Seite 1 und 2 vertauscht sind, muss nichts neu gescannt werden. Funktioniert auf dem Handy wie am Rechner; ein normaler Wisch scrollt weiterhin die Seite.
+- **↻ Drehen** — dreht die Seite um 90° im Uhrzeigersinn, genau so wie sie später im PDF liegt. Mehrfach drücken dreht weiter.
+- **⟳ Neu scannen** — markiert die Seite; der nächste Scan tauscht genau diese Seite 1:1 aus, die Reihenfolge bleibt. Nochmal drücken bricht ab.
 - **× Entfernen** — wirft die Seite aus dem Stapel.
+
+Während ein Stapel gesammelt wird, zeigt die Fortschrittsanzeige nur drei Schritte — es wird ja nichts hochgeladen. Der Upload-Schritt taucht erst beim Abschließen wieder auf.
 
 Während eines Stapels erscheint bewusst keine Vollbild-Vorschau nach jeder Seite; das Vorschaubild in der Liste reicht und hält den Ablauf schnell. Erst das fertige Dokument wird wieder groß angezeigt. Der Stapel überlebt einen Seiten-Reload und ist auf allen Geräten gleich — du kannst also am Handy scannen und am Rechner sortieren.
 
@@ -143,6 +147,17 @@ Damit lässt sich auch ein Stapel ohne Handy bedienen: ein Taster startet den St
 Als Auslöser eignet sich alles, was Home Assistant kennt: Bewegungsmelder, Zigbee-Taster, NFC-Tag, Sprachbefehl oder ein Zeitplan. Zusätzlich lässt sich unter *Webhook zurück an Home Assistant* eine URL hinterlegen — dorthin meldet Scan Deck nach jedem Scan `status`, `file`, `error` und `trigger`, sodass HA auf das Ergebnis reagieren kann.
 
 ## Paperless-ngx-Upload
+
+### Geschwindigkeit
+
+Ein Scan besteht aus drei Anfragen an den Scanner: Status abfragen, Auftrag anlegen, Dokument abholen. ScanDeck hält die HTTPS-Verbindung dazwischen offen, statt sie dreimal neu aufzubauen — der TLS-Handshake fällt damit nur einmal an, und Drucker-Firmware ist beim Verschlüsseln meist ziemlich langsam. Wie lange ein Scan gebraucht hat, steht im Live-Protokoll hinter dem Dateinamen.
+
+Der Rest der Wartezeit ist der Scanner selbst: Lampe aufwärmen, Schlitten fahren, Bild übertragen. Zwei Stellschrauben helfen spürbar:
+
+- **Auflösung** — 600 dpi dauert grob viermal so lange wie 300 dpi und bringt bei normalem Papier nichts. Für Briefe reichen 200–300 dpi.
+- **Farbmodus** — Graustufen überträgt ein Drittel der Daten von Farbe.
+
+Manche Geräte bieten eSCL zusätzlich unverschlüsselt auf Port 80 an (`http://scanner-ip:80` statt `https://scanner-ip:443`). Das spart den Handshake ganz. Im eigenen LAN ist das vertretbar; über Netzgrenzen hinweg bleib bei HTTPS.
 
 ### Durchsuchbare PDFs (OCR)
 

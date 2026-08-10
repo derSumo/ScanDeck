@@ -13,6 +13,20 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-10
+
+### Hinzugefügt
+
+- Seiten im Stapel lassen sich per Ziehen umsortieren — auf dem Handy nach kurzem Halten, am Rechner direkt. Die Kacheln weichen dabei animiert aus, ein normaler Wisch scrollt weiterhin.
+- Einzelne Seiten können um 90° gedreht werden. Die Drehung ist sofort in der Vorschau sichtbar und landet genauso im fertigen PDF.
+- Fragezeichen neben „Seiten im Stapel“ blendet eine kurze Erklärung der vier Seitenwerkzeuge ein.
+
+### Geändert
+
+- Das Stapel-Fenster klappt animiert auf und zu, statt hart zu erscheinen.
+- Während ein Stapel gesammelt wird, zeigt die Fortschrittsanzeige nur noch drei Schritte; der Upload-Schritt erscheint erst beim Abschließen.
+- Die Verbindung zum Scanner bleibt zwischen den drei Anfragen eines Scans offen (HTTP Keep-alive), was den TLS-Handshake zweimal pro Scan einspart. Die Dauer eines Scans steht jetzt im Live-Protokoll.
+
 ## [1.2.0] - 2026-08-10
 
 ### Hinzugefügt
@@ -68,7 +82,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/derSumo/ScanDeck/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/derSumo/ScanDeck/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/derSumo/ScanDeck/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/derSumo/ScanDeck/releases/tag/v1.0.0
