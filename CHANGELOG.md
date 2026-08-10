@@ -13,6 +13,19 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-10
+
+### Hinzugefügt
+
+- Stapel-Modus: Mehrere Einzelscans lassen sich zu einem einzigen PDF-Dokument zusammenfassen. Seiten erscheinen als Vorschauliste, einzelne Seiten können 1:1 ersetzt oder entfernt werden, und erst beim Abschluss wird das fertige Dokument abgelegt und hochgeladen. Der Stapel überlebt einen Reload und ist auf allen Geräten identisch.
+- `POST /api/ha/batch` steuert den Stapel aus Home Assistant heraus (`start`, `finish`, `cancel`); der Statussensor meldet zusätzlich `batch_active` und `batch_pages`.
+- Automatische Netzerkennung für die Scanner-Suche: Das Netz wird aus der Adresse des zugreifenden Geräts, der Paperless-Adresse und den üblichen Router-Standards abgeleitet und der Reihe nach durchsucht. Docker-eigene Netze werden zuletzt geprüft. Die manuelle Eingabe bleibt als Aufklappbereich erhalten.
+
+### Geändert
+
+- Die Scanner-Suche in Assistent und Einstellungen startet jetzt mit einem Klick, statt vorab ein Netz zu verlangen.
+- README erklärt, dass die Texterkennung von Paperless-ngx kommt, und nennt die nötigen Sprachvariablen.
+
 ## [1.1.0] - 2026-08-10
 
 ### Hinzugefügt
@@ -55,6 +68,7 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/derSumo/ScanDeck/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/derSumo/ScanDeck/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/derSumo/ScanDeck/releases/tag/v1.0.0

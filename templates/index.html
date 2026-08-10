@@ -42,12 +42,16 @@
           <section class="wizard-step" data-step="1">
             <span class="step-kicker">Schritt 1 · Scanner</span>
             <h2>Welchen Scanner nutzt du?</h2>
-            <p class="step-text">Das Netzwerk wird nach eSCL-fähigen Geräten durchsucht. Alternativ kannst du die Adresse direkt eintragen.</p>
-            <div class="field-row">
-              <label class="field"><span>Netzwerk</span><input id="wiz-subnet" type="text" inputmode="text" spellcheck="false" placeholder="10.0.0.0/24"></label>
-              <button id="wiz-discover" class="btn ghost" type="button">Suchen</button>
-            </div>
+            <p class="step-text">Die Suche findet dein Netzwerk selbst heraus und klappert es nach eSCL-fähigen Geräten ab. Das dauert einen Moment.</p>
+            <button id="wiz-discover" class="btn primary wide" type="button">Netzwerk automatisch durchsuchen</button>
             <div id="wiz-devices" class="device-list" aria-live="polite"></div>
+            <details class="manual-net">
+              <summary>Netzwerk manuell angeben <span class="chev" aria-hidden="true"></span></summary>
+              <div class="field-row">
+                <label class="field"><span>Netzwerk</span><input id="wiz-subnet" type="text" inputmode="text" spellcheck="false" placeholder="192.168.1.0/24"></label>
+                <button id="wiz-discover-manual" class="btn ghost" type="button">Suchen</button>
+              </div>
+            </details>
             <label class="field"><span>eSCL Endpoint</span><input id="wiz-scanner-url" type="url" inputmode="url" spellcheck="false" placeholder="https://192.168.1.50:443"></label>
             <label class="switch"><input id="wiz-verify-ssl" type="checkbox"><i></i><span>TLS-Zertifikat prüfen</span></label>
             <button id="wiz-test-scanner" class="btn ghost wide" type="button">Verbindung testen</button>
@@ -153,6 +157,26 @@
           </button>
         </div>
 
+        <div class="batch-bar">
+          <label class="switch batch-switch">
+            <input id="batch-toggle" type="checkbox"><i></i>
+            <span>Stapel <small>mehrere Seiten in eine PDF</small></span>
+          </label>
+          <span id="batch-count" class="batch-count" hidden>0</span>
+        </div>
+
+        <section id="batch-panel" class="card batch-panel" hidden>
+          <div class="card-head">
+            <h2>Seiten im Stapel</h2>
+            <span id="batch-hint" class="batch-hint">Scanne die erste Seite</span>
+          </div>
+          <div id="batch-pages" class="batch-pages"></div>
+          <div class="batch-actions">
+            <button id="batch-cancel" class="btn ghost" type="button">Verwerfen</button>
+            <button id="batch-finish" class="btn primary" type="button" disabled>Als PDF ablegen</button>
+          </div>
+        </section>
+
         <div class="quick-row" role="group" aria-label="Scanprofil">
           <button class="quick" data-quick="source" type="button"><span>Quelle</span><b id="quick-source">Flachbett</b></button>
           <button class="quick" data-quick="output_format" type="button"><span>Format</span><b id="quick-format">PDF</b></button>
@@ -187,11 +211,15 @@
         <section class="card">
           <div class="card-head"><h2>Scanner</h2><button id="test-scanner" class="btn tiny ghost" type="button">Test</button></div>
           <label class="field"><span>eSCL Endpoint</span><input id="scanner-url" type="url" inputmode="url" spellcheck="false" placeholder="https://192.168.1.50:443"></label>
-          <div class="field-row">
-            <label class="field"><span>Netzwerk für die Suche</span><input id="discovery-subnet" type="text" spellcheck="false" placeholder="10.0.0.0/24"></label>
-            <button id="discover-scanners" class="btn ghost" type="button">Suchen</button>
-          </div>
+          <button id="discover-scanners" class="btn ghost wide" type="button">Netzwerk automatisch durchsuchen</button>
           <div id="discovery-results" class="device-list" aria-live="polite"></div>
+          <details class="manual-net">
+            <summary>Netzwerk manuell angeben <span class="chev" aria-hidden="true"></span></summary>
+            <div class="field-row">
+              <label class="field"><span>Netzwerk für die Suche</span><input id="discovery-subnet" type="text" spellcheck="false" placeholder="192.168.1.0/24"></label>
+              <button id="discover-manual" class="btn ghost" type="button">Suchen</button>
+            </div>
+          </details>
           <label class="switch"><input id="verify-scanner-ssl" type="checkbox"><i></i><span>TLS-Zertifikat prüfen</span></label>
         </section>
 

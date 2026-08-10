@@ -237,6 +237,124 @@ body.is-scanning .orb-beam { animation: beam 1.8s ease-in-out infinite; }
 .quick b { font-size: 13px; font-weight: 600; }
 .quick.flash { border-color: var(--accent); background: var(--accent-soft); }
 
+/* Batch mode -------------------------------------------------------------- */
+.batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  transition: border-color 0.3s, background 0.3s;
+}
+body.batch-on .batch-bar { border-color: rgba(255, 176, 60, 0.32); background: rgba(255, 176, 60, 0.06); }
+.batch-switch { flex: 1; font-size: 14.5px; }
+.batch-switch small { display: block; font-size: 11.5px; color: var(--text-faint); font-weight: 400; }
+
+.batch-count {
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #191203;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  animation: chip-in 0.32s var(--ease) both;
+}
+.batch-count[hidden] { display: none; }
+
+.batch-panel { animation: view-in 0.36s var(--ease) both; }
+.batch-hint { font-size: 11.5px; color: var(--accent); }
+
+.batch-pages {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+}
+.batch-pages:empty::after {
+  content: "Noch keine Seite gescannt.";
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+.batch-page {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #0b0d0f;
+  aspect-ratio: 3 / 4;
+  animation: chip-in 0.34s var(--ease) both;
+}
+.batch-page img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.batch-page.armed { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(255, 176, 60, 0.28); }
+.batch-page.armed::after {
+  content: "wird ersetzt";
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 4px;
+  background: var(--accent);
+  color: #191203;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+.batch-page .page-number {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  min-width: 19px;
+  height: 19px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(11, 13, 15, 0.82);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.batch-page .page-tools { position: absolute; top: 5px; right: 5px; display: grid; gap: 4px; }
+.batch-page .page-tools button {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(11, 13, 15, 0.82);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.batch-page .page-tools button:hover { background: var(--accent); color: #191203; }
+.batch-page .page-tools .remove:hover { background: var(--err); color: #fff; }
+
+.batch-actions { display: flex; gap: 8px; }
+.batch-actions .btn { flex: 1; }
+
+/* Manual network fallback ------------------------------------------------- */
+.manual-net { border-top: 1px solid var(--line); padding-top: 4px; }
+.manual-net summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  cursor: pointer;
+  list-style: none;
+}
+.manual-net summary::-webkit-details-marker { display: none; }
+.manual-net .field-row { padding-top: 6px; }
+
 /* Cards ------------------------------------------------------------------- */
 .card {
   display: flex;

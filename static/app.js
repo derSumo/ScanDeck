@@ -19,6 +19,7 @@ const QUICK_CYCLE = {
 };
 
 const STAGE_TEXT = {
+  merge: "Seiten werden zu einer PDF zusammengefügt …",
   start: "Scan wird vorbereitet …",
   connect: "Verbinde mit dem Scanner …",
   job: "Scanauftrag wird übermittelt …",
@@ -38,6 +39,8 @@ const state = {
   wizardStep: 0,
   wizardTags: [],
   running: false,
+  batch: { active: false, pages: [], replace_index: null },
+  progressTitle: "Scan läuft",
   scanStart: 0,
   previewTimer: null,
   elapsedTimer: null,
@@ -335,6 +338,128 @@ async function loadConfig() {
   return config;
 }
 
+/* --- batch mode ---------------------------------------------------------- */
+
+function renderBatch(batch) {
+  state.batch = batch;
+  const pages = batch.pages || [];
+  const armed = batch.replace_index;
+
+  document.body.classList.toggle("batch-on", batch.active);
+  setValue("batch-toggle", batch.active);
+  $("#batch-panel").hidden = !batch.active;
+  $("#batch-count").hidden = !batch.active || pages.length === 0;
+  $("#batch-count").textContent = String(pages.length);
+  $("#batch-finish").disabled = pages.length === 0;
+
+  $("#batch-hint").textContent =
+    armed !== null && armed !== undefined
+      ? `Nächster Scan ersetzt Seite ${armed + 1}`
+      : pages.length === 0
+      ? "Scanne die erste Seite"
+      : `${pages.length} Seite(n) — weiter scannen oder ablegen`;
+
+  const container = $("#batch-pages");
+  container.replaceChildren();
+  pages.forEach((page, index) => {
+    const tile = document.createElement("div");
+    tile.className = `batch-page${index === armed ? " armed" : ""}`;
+
+    const image = document.createElement("img");
+    image.src = `/api/batch/page/${index}/preview?v=${encodeURIComponent(page.name)}`;
+    image.alt = `Seite ${index + 1}`;
+    image.loading = "lazy";
+
+    const number = document.createElement("span");
+    number.className = "page-number";
+    number.textContent = String(index + 1);
+
+    const tools = document.createElement("div");
+    tools.className = "page-tools";
+
+    const replace = document.createElement("button");
+    replace.type = "button";
+    replace.textContent = "⟳";
+    replace.title = index === armed ? "Ersetzen abbrechen" : "Diese Seite neu scannen";
+    replace.setAttribute("aria-label", replace.title);
+    replace.addEventListener("click", () => armReplace(index === armed ? null : index));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove";
+    remove.textContent = "×";
+    remove.title = "Seite entfernen";
+    remove.setAttribute("aria-label", `Seite ${index + 1} entfernen`);
+    remove.addEventListener("click", () => removePage(index));
+
+    tools.append(replace, remove);
+    tile.append(image, number, tools);
+    container.append(tile);
+  });
+
+  const armedNow = armed !== null && armed !== undefined;
+  $("#orb-label").textContent = state.running
+    ? "Scannt …"
+    : armedNow
+    ? `Seite ${armed + 1} ersetzen`
+    : batch.active
+    ? pages.length === 0
+      ? "Erste Seite scannen"
+      : "Seite hinzufügen"
+    : "Scan starten";
+}
+
+async function loadBatch() {
+  renderBatch(await api("/api/batch"));
+}
+
+async function toggleBatch() {
+  const on = getValue("batch-toggle");
+  try {
+    if (on) {
+      renderBatch(await api("/api/batch/start", { method: "POST", body: "{}" }));
+      toast("Stapel gestartet — jede Seite wird gesammelt");
+    } else if ((state.batch?.pages || []).length && !window.confirm("Gesammelte Seiten verwerfen?")) {
+      setValue("batch-toggle", true);
+    } else {
+      renderBatch(await api("/api/batch/cancel", { method: "POST", body: "{}" }));
+    }
+  } catch (error) {
+    toast(error.message, "error");
+    loadBatch().catch(() => {});
+  }
+}
+
+async function armReplace(index) {
+  try {
+    renderBatch(await api("/api/batch/replace", { method: "POST", body: JSON.stringify({ index }) }));
+    if (index !== null) toast(`Scan starten, um Seite ${index + 1} zu ersetzen`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function removePage(index) {
+  try {
+    renderBatch(await api(`/api/batch/page/${index}`, { method: "DELETE" }));
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function finishBatch() {
+  try {
+    state.progressTitle = "Stapel wird abgeschlossen";
+    setScanning(true);
+    setProgress(10, "merge");
+    await api("/api/batch/finish", { method: "POST", body: JSON.stringify({ session_tags: state.sessionTags }) });
+  } catch (error) {
+    setScanning(false);
+    hideProgress();
+    toast(error.message, "error");
+  }
+}
+
 /* --- update check -------------------------------------------------------- */
 
 async function checkForUpdate(force = false) {
@@ -410,7 +535,7 @@ function showProgress() {
   const overlay = $("#progress-overlay");
   overlay.hidden = false;
   overlay.classList.remove("closing");
-  $("#progress-title").textContent = "Scan läuft";
+  $("#progress-title").textContent = state.progressTitle || "Scan läuft";
   state.scanStart = Date.now();
   clearInterval(state.elapsedTimer);
   state.elapsedTimer = setInterval(() => {
@@ -454,6 +579,7 @@ async function startScan() {
     return;
   }
   try {
+    state.progressTitle = state.batch?.active ? "Seite wird gescannt" : "Scan läuft";
     setScanning(true);
     setProgress(2, "start");
     await api("/api/scan", { method: "POST", body: JSON.stringify({ session_tags: state.sessionTags }) });
@@ -533,7 +659,15 @@ function handleProgress(event) {
     setTimeout(() => {
       hideProgress();
       setScanning(false);
-      showPreview(event.file);
+      if (event.batch) {
+        // Inside a batch the thumbnail strip is the feedback; a full-screen
+        // preview after every page would only be in the way.
+        loadBatch().catch(() => {});
+        toast(`Seite ${(event.page_index ?? 0) + 1} erfasst · ${event.pages} im Stapel`, "success");
+      } else {
+        showPreview(event.file);
+        loadBatch().catch(() => {});
+      }
       refreshState().catch(() => {});
     }, 620);
   }
@@ -565,6 +699,11 @@ function connectEvents() {
 async function refreshState() {
   const scanState = await api("/api/state");
   renderLastScan(scanState);
+  if (scanState.batch) {
+    // Keeps a second device (or a batch driven by Home Assistant) in sync.
+    const changed = JSON.stringify(scanState.batch) !== JSON.stringify(state.batch);
+    if (changed) renderBatch(scanState.batch);
+  }
   if (scanState.running) {
     setScanning(true);
     setProgress(scanState.progress, scanState.stage);
@@ -578,18 +717,33 @@ async function refreshState() {
 
 /* --- discovery ----------------------------------------------------------- */
 
-async function runDiscovery(subnetId, containerId, targetId) {
+async function runDiscovery(subnetId, containerId, targetId, auto = false) {
   const container = document.getElementById(containerId);
-  container.replaceChildren(Object.assign(document.createElement("p"), { textContent: "Suche läuft …" }));
+  const status = Object.assign(document.createElement("p"), {
+    textContent: auto ? "Netzwerke werden durchsucht … das dauert einen Moment." : "Suche läuft …",
+  });
+  container.replaceChildren(status);
   try {
     const found = await api("/api/discover/scanners", {
       method: "POST",
-      body: JSON.stringify({ discovery_subnet: getValue(subnetId) }),
+      body: JSON.stringify({ discovery_subnet: auto ? "" : getValue(subnetId), auto }),
     });
     container.replaceChildren();
     if (!found.devices.length) {
-      container.append(Object.assign(document.createElement("p"), { textContent: "Kein eSCL-Scanner gefunden." }));
+      container.append(
+        Object.assign(document.createElement("p"), {
+          textContent: auto
+            ? "Kein Scanner gefunden. Trage das Netzwerk unten manuell ein."
+            : "Kein eSCL-Scanner gefunden.",
+        })
+      );
       return;
+    }
+    if (found.subnet) {
+      setValue(subnetId, found.subnet);
+      container.append(
+        Object.assign(document.createElement("p"), { textContent: `Gefunden in ${found.subnet}` })
+      );
     }
     found.devices.forEach((device) => {
       const item = document.createElement("button");
@@ -832,18 +986,33 @@ $("#test-paperless").addEventListener("click", async () => {
   }
 });
 
-$("#discover-scanners").addEventListener("click", async () => {
-  const button = $("#discover-scanners");
-  button.disabled = true;
-  await runDiscovery("discovery-subnet", "discovery-results", "scanner-url");
-  button.disabled = false;
-});
+function bindDiscovery(buttonId, subnetId, containerId, targetId, auto) {
+  const button = $(`#${buttonId}`);
+  button.addEventListener("click", async () => {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "Suche läuft …";
+    await runDiscovery(subnetId, containerId, targetId, auto);
+    button.textContent = label;
+    button.disabled = false;
+  });
+}
 
-$("#wiz-discover").addEventListener("click", async () => {
-  const button = $("#wiz-discover");
-  button.disabled = true;
-  await runDiscovery("wiz-subnet", "wiz-devices", "wiz-scanner-url");
-  button.disabled = false;
+bindDiscovery("discover-scanners", "discovery-subnet", "discovery-results", "scanner-url", true);
+bindDiscovery("discover-manual", "discovery-subnet", "discovery-results", "scanner-url", false);
+bindDiscovery("wiz-discover", "wiz-subnet", "wiz-devices", "wiz-scanner-url", true);
+bindDiscovery("wiz-discover-manual", "wiz-subnet", "wiz-devices", "wiz-scanner-url", false);
+
+$("#batch-toggle").addEventListener("change", toggleBatch);
+$("#batch-finish").addEventListener("click", finishBatch);
+$("#batch-cancel").addEventListener("click", async () => {
+  if ((state.batch?.pages || []).length && !window.confirm("Gesammelte Seiten verwerfen?")) return;
+  try {
+    renderBatch(await api("/api/batch/cancel", { method: "POST", body: "{}" }));
+    toast("Stapel verworfen");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 });
 
 $("#wiz-test-scanner").addEventListener("click", async () => {

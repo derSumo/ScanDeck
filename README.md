@@ -85,9 +85,22 @@ Damit iOS die App installieren lässt, muss die Seite über HTTPS oder `localhos
 
 Während des Scans erscheint eine Fortschrittsanzeige mit Prozentwert, Laufzeit und Phasen (Verbindung → Erfassen → Speichern → Upload). Anschließend wird der Scan **10 Sekunden lang als Vorschau** eingeblendet (Dauer unter *Einstellungen → Ausgabe* änderbar, `0` schaltet sie ab). Über *Angeheftet lassen* bleibt die Vorschau offen, *Öffnen* zeigt die Originaldatei.
 
+### Mehrere Seiten in eine PDF
+
+Für alles, was länger als ein Blatt ist: Auf dem Dashboard den Schalter **Stapel** umlegen. Ab dann landet jeder Scan als Seite im Stapel statt sofort in Paperless. Du scannst also Blatt für Blatt, siehst die Seiten als Vorschaubilder untereinander und drückst am Ende **Als PDF ablegen** — daraus wird ein einziges Dokument, das als Ganzes hochgeladen wird.
+
+Jede Seitenkachel hat zwei Knöpfe:
+
+- **⟳ Ersetzen** — markiert die Seite; der nächste Scan tauscht genau diese Seite 1:1 aus, die Reihenfolge bleibt. Praktisch, wenn ein Blatt schief lag. Nochmal drücken bricht ab.
+- **× Entfernen** — wirft die Seite aus dem Stapel.
+
+Während eines Stapels erscheint bewusst keine Vollbild-Vorschau nach jeder Seite; das Vorschaubild in der Liste reicht und hält den Ablauf schnell. Erst das fertige Dokument wird wieder groß angezeigt. Der Stapel überlebt einen Seiten-Reload und ist auf allen Geräten gleich — du kannst also am Handy scannen und am Rechner sortieren.
+
+Das Format des Stapels ist immer PDF, unabhängig von der Formateinstellung. Einzelne Seiten dürfen gemischt sein (PDF vom Scanner oder JPEG), sie werden beim Zusammenführen vereinheitlicht. Auch der automatische Einzug (ADF) funktioniert im Stapel: Er liefert pro Scan mehrere Seiten, die alle angehängt werden.
+
 **Einstellungen** verwaltet Scanner, Paperless-ngx, Ausgabe, Standard-Tags, Home Assistant und das Zurücksetzen der Konfiguration.
 
-- Unter **Scanner** entweder die eSCL-URL eintragen oder ein privates IPv4-/24-Netz durchsuchen. Die Suche prüft ausschließlich `ScannerCapabilities` und löst keinen Scan aus.
+- Unter **Scanner** genügt ein Klick auf *Netzwerk automatisch durchsuchen*. ScanDeck rät das Netz nicht, sondern leitet es aus der Adresse des Geräts ab, mit dem du gerade die Oberfläche geöffnet hast — das steht im selben Netz wie der Scanner. Zusätzlich werden die Netze deiner Paperless-Adresse und die üblichen Router-Standards (`192.168.0.x`, `192.168.1.x`, `192.168.178.x`, `10.0.0.x`) geprüft, bis etwas gefunden wird. Docker-eigene Netze werden dabei ans Ende gestellt, weil dort nie ein Scanner steht. Manuell geht weiterhin über *Netzwerk manuell angeben*. Die Suche prüft ausschließlich `ScannerCapabilities` und löst keinen Scan aus.
 - Der Paperless-Token wird nur in `./data/config.json` gespeichert und nie wieder an den Browser ausgegeben.
 - Standardformat ist **PDF**.
 - *Konfiguration löschen* setzt alles zurück und startet den Assistenten erneut.
@@ -100,6 +113,7 @@ Unter *Einstellungen → Home Assistant* die Schnittstelle aktivieren; dabei wir
 | --- | --- | --- |
 | `/api/ha/scan` | POST | Scan auslösen. Optionaler JSON-Body: `tags`, `source`, `resolution`, `color_mode`, `output_format`, `upload_to_paperless`, `title_prefix`. |
 | `/api/ha/state` | GET | Status für einen RESTful-Sensor: `state` (`idle`/`scanning`/`error`), `progress`, `stage`, `last_file`, `last_error`. |
+| `/api/ha/batch` | POST | Stapel steuern: `{"action": "start"}`, `"finish"` oder `"cancel"`. Bei laufendem Stapel wird jeder ausgelöste Scan zu einer weiteren Seite. |
 | `/api/ha/test` | POST | Verbindungstest. |
 
 Authentifizierung über den Header `X-API-Key` (alternativ `Authorization: Bearer …` oder `?api_key=`). Ohne aktivierte Schnittstelle antworten die Endpunkte mit `403`.
@@ -124,9 +138,29 @@ automation:
       - service: rest_command.scan_deck_scan
 ```
 
+Damit lässt sich auch ein Stapel ohne Handy bedienen: ein Taster startet den Stapel, jeder weitere Druck scannt eine Seite, langes Drücken schließt ab.
+
 Als Auslöser eignet sich alles, was Home Assistant kennt: Bewegungsmelder, Zigbee-Taster, NFC-Tag, Sprachbefehl oder ein Zeitplan. Zusätzlich lässt sich unter *Webhook zurück an Home Assistant* eine URL hinterlegen — dorthin meldet Scan Deck nach jedem Scan `status`, `file`, `error` und `trigger`, sodass HA auf das Ergebnis reagieren kann.
 
 ## Paperless-ngx-Upload
+
+### Durchsuchbare PDFs (OCR)
+
+ScanDeck macht **kein** OCR. Der Scanner liefert ein reines Bild-PDF, und genau das wird abgelegt und hochgeladen. Die Texterkennung übernimmt Paperless-ngx beim Import mit OCRmyPDF/Tesseract — dort entsteht das durchsuchbare Dokument. Die Datei in `./scans` bleibt dagegen immer ein Bild-PDF.
+
+Wichtig ist dabei die Sprache: Paperless-ngx erkennt standardmäßig **Englisch**. Für deutsche Dokumente gehört in dessen Compose-Datei:
+
+```yaml
+environment:
+  PAPERLESS_OCR_LANGUAGE: deu
+  PAPERLESS_OCR_LANGUAGES: deu eng
+```
+
+`PAPERLESS_OCR_LANGUAGE` ist die Sprache, mit der erkannt wird; `PAPERLESS_OCR_LANGUAGES` bestimmt, welche Sprachpakete überhaupt installiert werden. Ohne das zweite fehlt Tesseract das deutsche Modell. Ab Paperless-ngx 2.x lässt sich die Sprache alternativ in dessen Oberfläche unter *Einstellungen → Konfiguration* setzen; ist sie dort leer, gilt die Umgebungsvariable.
+
+Kontrollieren lässt sich das an einem importierten Dokument: Enthält der Textinhalt in Paperless deutsche Umlaute statt Zeichensalat, passt die Sprache.
+
+### Upload
 
 Der Upload verwendet `POST /api/documents/post_document/` mit Token-Authentifizierung. Standard-Tags werden über ihre Namen in Paperless-IDs aufgelöst; optional legt die App fehlende Tags selbst an. Paperless verarbeitet das Dokument anschließend asynchron. Siehe die [Paperless-ngx API-Dokumentation](https://docs.paperless-ngx.com/api/).
 

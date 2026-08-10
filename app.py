@@ -15,10 +15,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import wraps
-from ipaddress import IPv4Network, ip_network
+from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network
 from pathlib import Path
 from typing import Any, Callable, Iterator
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
@@ -49,6 +49,7 @@ RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 UPDATE_CACHE_SECONDS = 6 * 3600
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/data"))
 CONFIG_PATH = APP_DATA_DIR / "config.json"
+BATCH_DIR = APP_DATA_DIR / "batch"
 DEFAULT_OUTPUT_DIR = os.environ.get("SCAN_OUTPUT_DIR", "/scans")
 PWG_NS = "http://www.pwg.org/schemas/2010/12/sm"
 SCAN_NS = "http://schemas.hp.com/imaging/escl/2011/05/03"
@@ -338,10 +339,65 @@ def guess_local_subnet() -> str:
         return ""
     finally:
         probe.close()
+    return subnet_of(address)
+
+
+def subnet_of(address: str) -> str:
+    """The /24 an IPv4 address belongs to, or "" if it is not a usable private one."""
     try:
-        return str(ip_network(f"{address}/24", strict=False))
+        host = ip_address(str(address or "").strip())
     except ValueError:
         return ""
+    if not isinstance(host, IPv4Address) or not host.is_private or host.is_loopback or host.is_link_local:
+        return ""
+    return str(ip_network(f"{host}/24", strict=False))
+
+
+def is_container_network(subnet: str) -> bool:
+    """Docker's own bridge ranges never hold the scanner, so they rank last."""
+    try:
+        network = ip_network(subnet, strict=False)
+    except ValueError:
+        return True
+    return any(network.subnet_of(ip_network(pool)) for pool in ("172.17.0.0/16", "172.18.0.0/15", "10.88.0.0/16"))
+
+
+# Typical home router defaults, tried when nothing better is known.
+COMMON_SUBNETS = (
+    "192.168.0.0/24",
+    "192.168.1.0/24",
+    "192.168.178.0/24",  # AVM Fritz!Box
+    "192.168.2.0/24",
+    "10.0.0.0/24",
+)
+
+
+def candidate_subnets(config: dict[str, Any], client_address: str | None = None) -> list[str]:
+    """Rank the networks worth probing, best hint first.
+
+    The device that opens the interface sits on the same LAN as the scanner, so
+    its address beats everything the container can see about itself: in Docker's
+    default bridge mode the container only knows its 172.x network.
+    """
+    candidates: list[str] = []
+    fallbacks: list[str] = []
+
+    def add(subnet: str) -> None:
+        # Container networks never hold the scanner, so they go to the very end
+        # instead of wasting the first search round.
+        target = fallbacks if is_container_network(subnet) else candidates
+        if subnet and subnet not in candidates and subnet not in fallbacks:
+            target.append(subnet)
+
+    add(subnet_of(client_address or ""))
+    for url in (config.get("paperless_url", ""), config.get("scanner_url", "")):
+        host = urlparse(url).hostname if url else None
+        if host:
+            add(subnet_of(host))
+    add(guess_local_subnet())
+    for subnet in COMMON_SUBNETS:
+        add(subnet)
+    return candidates + fallbacks
 
 
 class ScannerClient:
@@ -544,6 +600,22 @@ def discover_escl_scanners(config: dict[str, Any], log: LogHub) -> list[dict[str
     return devices
 
 
+def autodiscover_scanners(
+    config: dict[str, Any],
+    log: LogHub,
+    client_address: str | None = None,
+    limit: int = 4,
+) -> tuple[list[dict[str, str]], str]:
+    """Probe the likeliest networks in order and stop at the first hit."""
+    candidates = candidate_subnets(config, client_address)[:limit]
+    log.publish(f"Automatische Suche in: {', '.join(candidates)}")
+    for subnet in candidates:
+        devices = discover_escl_scanners({**config, "discovery_subnet": subnet}, log)
+        if devices:
+            return devices, subnet
+    return [], ""
+
+
 class PaperlessClient:
     def __init__(self, config: dict[str, Any], log: LogHub) -> None:
         self.config = config
@@ -624,6 +696,10 @@ scan_state: dict[str, Any] = {
     "trigger": None,
 }
 preview_cache: dict[str, Any] = {"path": None, "image": None}
+# Pages collected for a multi-document scan; "replace_index" arms the next scan
+# to overwrite one page instead of appending.
+batch_state: dict[str, Any] = {"active": False, "pages": [], "replace_index": None}
+batch_lock = threading.Lock()
 
 
 def check_writable(directory: Path, label: str) -> None:
@@ -644,6 +720,127 @@ def check_writable(directory: Path, label: str) -> None:
 
 check_writable(APP_DATA_DIR, "Konfigurationsverzeichnis")
 check_writable(Path(store.get()["output_dir"]), "Scan-Ablage")
+
+
+# --------------------------------------------------------------------------- #
+# Batch scanning: collect single pages, then merge them into one PDF
+# --------------------------------------------------------------------------- #
+
+def batch_public() -> dict[str, Any]:
+    with batch_lock:
+        return {
+            "active": batch_state["active"],
+            "replace_index": batch_state["replace_index"],
+            "pages": [
+                {"index": index, "name": page["name"], "kind": page["kind"]}
+                for index, page in enumerate(batch_state["pages"])
+            ],
+        }
+
+
+def batch_clear() -> None:
+    """Drop every collected page and its file."""
+    with batch_lock:
+        for page in batch_state["pages"]:
+            try:
+                Path(page["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+        batch_state.update({"active": False, "pages": [], "replace_index": None})
+
+
+def batch_store(source: Path) -> int:
+    """Move a finished scan into the batch, replacing a page when armed."""
+    BATCH_DIR.mkdir(parents=True, exist_ok=True)
+    target = BATCH_DIR / f"page_{int(time.time() * 1000)}{source.suffix.lower()}"
+    target.write_bytes(source.read_bytes())
+    source.unlink(missing_ok=True)
+    entry = {
+        "name": target.name,
+        "path": str(target),
+        "kind": "pdf" if target.suffix.lower() == ".pdf" else "image",
+    }
+    with batch_lock:
+        index = batch_state["replace_index"]
+        if index is not None and 0 <= index < len(batch_state["pages"]):
+            previous = batch_state["pages"][index]
+            try:
+                Path(previous["path"]).unlink(missing_ok=True)
+            except OSError:
+                pass
+            batch_state["pages"][index] = entry
+            batch_state["replace_index"] = None
+            return index
+        batch_state["pages"].append(entry)
+        batch_state["replace_index"] = None
+        return len(batch_state["pages"]) - 1
+
+
+def as_pdf_document(path: Path) -> "pypdfium2.PdfDocument":
+    """Every page becomes a PDF so the merge only has to deal with one format."""
+    import pypdfium2
+    from PIL import Image
+
+    if path.suffix.lower() == ".pdf":
+        return pypdfium2.PdfDocument(str(path))
+    buffer = io.BytesIO()
+    Image.open(path).convert("RGB").save(buffer, "PDF", resolution=200.0)
+    return pypdfium2.PdfDocument(buffer.getvalue())
+
+
+def merge_batch(pages: list[dict[str, Any]], target: Path) -> int:
+    """Combine the collected pages into a single PDF. Returns the page count."""
+    import pypdfium2
+
+    merged = pypdfium2.PdfDocument.new()
+    sources = []
+    try:
+        for page in pages:
+            document = as_pdf_document(Path(page["path"]))
+            sources.append(document)
+            merged.import_pages(document)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        merged.save(str(target))
+        return len(merged)
+    finally:
+        for document in sources:
+            document.close()
+        merged.close()
+
+
+def finish_batch(config: dict[str, Any], session_tags: list[str]) -> Path:
+    """Merge, store and (optionally) upload the collected pages as one document."""
+    with batch_lock:
+        pages = list(batch_state["pages"])
+    if not pages:
+        raise RuntimeError("Der Stapel enthält keine Seiten.")
+
+    logs.progress("merge", 30)
+    logs.publish(f"Füge {len(pages)} Seite(n) zu einem PDF zusammen …")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    target = Path(config["output_dir"]) / f"scan_{timestamp}_{len(pages)}-seiten.pdf"
+    page_count = merge_batch(pages, target)
+    logs.publish(f"Dokument erstellt: {target.name} ({page_count} Seiten)", "success")
+
+    preview_cache.update({"path": None, "image": None})
+    scan_state.update({
+        "last_file": str(target),
+        "last_name": target.name,
+        "last_kind": "pdf",
+        "last_finished": datetime.now().isoformat(timespec="seconds"),
+    })
+
+    if config["upload_to_paperless"]:
+        logs.progress("upload", 80)
+        upload_config = {**config}
+        if session_tags:
+            upload_config["default_tags"] = list(dict.fromkeys(config["default_tags"] + session_tags))
+        PaperlessClient(upload_config, logs).upload(target)
+    else:
+        logs.publish("Upload nach Paperless-ngx ist deaktiviert.", "warning")
+
+    batch_clear()
+    return target
 
 
 # --------------------------------------------------------------------------- #
@@ -685,6 +882,18 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
             PaperlessClient(config, logs)._require_config()
         scanner = ScannerClient(config, logs)
         file_path = scanner.scan()
+
+        if batch_state["active"]:
+            # Collect the page; nothing is uploaded until the batch is closed.
+            replaced = batch_state["replace_index"]
+            index = batch_store(file_path)
+            total = len(batch_state["pages"])
+            action = f"Seite {index + 1} ersetzt" if replaced is not None else f"Seite {total} aufgenommen"
+            logs.publish(f"{action} · {total} Seite(n) im Stapel.", "success")
+            logs.progress("done", 100, batch=True, pages=total, page_index=index)
+            notify_home_assistant(config, "page", f"Seite {index + 1}", None)
+            return
+
         preview_cache.update({"path": None, "image": None})
         scan_state.update({
             "last_file": str(file_path),
@@ -854,7 +1063,11 @@ def reset_setup() -> Response:
 
 @app.get("/api/state")
 def state() -> Response:
-    return jsonify({**scan_state, "setup_complete": store.get()["setup_complete"]})
+    return jsonify({
+        **scan_state,
+        "setup_complete": store.get()["setup_complete"],
+        "batch": batch_public(),
+    })
 
 
 @app.post("/api/test/scanner")
@@ -879,16 +1092,29 @@ def test_paperless() -> Response:
 
 @app.post("/api/discover/scanners")
 def discover_scanners() -> Response:
+    """Search one given network, or auto-detect the likely ones when none is set."""
     try:
         payload = request.get_json(silent=True) or {}
         config = store.get()
-        if payload.get("discovery_subnet"):
-            config["discovery_subnet"] = str(payload["discovery_subnet"]).strip()
-        devices = discover_escl_scanners(config, logs)
-        return jsonify({"ok": True, "devices": devices})
+        subnet = str(payload.get("discovery_subnet") or "").strip()
+
+        if subnet and not payload.get("auto"):
+            config["discovery_subnet"] = subnet
+            devices = discover_escl_scanners(config, logs)
+            return jsonify({"ok": True, "devices": devices, "subnet": config["discovery_subnet"]})
+
+        devices, found_in = autodiscover_scanners(config, logs, request.remote_addr)
+        if not devices:
+            logs.publish("Kein Scanner gefunden. Netzwerk bitte manuell angeben.", "warning")
+        return jsonify({"ok": True, "devices": devices, "subnet": found_in, "auto": True})
     except (ValueError, requests.RequestException) as error:
         logs.publish(f"Scanner-Suche fehlgeschlagen: {error}", "error")
         return jsonify({"ok": False, "error": str(error)}), 400
+
+
+@app.get("/api/discover/candidates")
+def discovery_candidates() -> Response:
+    return jsonify({"candidates": candidate_subnets(store.get(), request.remote_addr)[:4]})
 
 
 @app.post("/api/scan")
@@ -900,6 +1126,110 @@ def start_scan() -> Response:
     if not start_scan_job(session_tags, "ui", payload.get("overrides")):
         return jsonify({"error": "Ein Scan läuft bereits."}), 409
     return jsonify({"ok": True, "message": "Scan wurde gestartet."}), 202
+
+
+@app.get("/api/batch")
+def get_batch() -> Response:
+    return jsonify(batch_public())
+
+
+@app.post("/api/batch/start")
+def start_batch() -> Response:
+    batch_clear()
+    with batch_lock:
+        batch_state["active"] = True
+    logs.publish("Stapel gestartet — Seiten werden gesammelt.", "success")
+    return jsonify(batch_public())
+
+
+@app.post("/api/batch/cancel")
+def cancel_batch() -> Response:
+    pages = len(batch_state["pages"])
+    batch_clear()
+    logs.publish(f"Stapel verworfen ({pages} Seite(n)).", "warning")
+    return jsonify(batch_public())
+
+
+@app.post("/api/batch/replace")
+def arm_replace() -> Response:
+    """Arm the next scan to overwrite one page instead of appending."""
+    payload = request.get_json(silent=True) or {}
+    index = payload.get("index")
+    with batch_lock:
+        if index is None:
+            batch_state["replace_index"] = None
+        elif not isinstance(index, int) or not 0 <= index < len(batch_state["pages"]):
+            return jsonify({"error": "Diese Seite gibt es nicht."}), 400
+        else:
+            batch_state["replace_index"] = index
+    if index is not None:
+        logs.publish(f"Nächster Scan ersetzt Seite {int(index) + 1}.")
+    return jsonify(batch_public())
+
+
+@app.delete("/api/batch/page/<int:index>")
+def delete_batch_page(index: int) -> Response:
+    with batch_lock:
+        if not 0 <= index < len(batch_state["pages"]):
+            return jsonify({"error": "Diese Seite gibt es nicht."}), 404
+        page = batch_state["pages"].pop(index)
+        if batch_state["replace_index"] is not None:
+            batch_state["replace_index"] = None
+    try:
+        Path(page["path"]).unlink(missing_ok=True)
+    except OSError:
+        pass
+    logs.publish(f"Seite {index + 1} aus dem Stapel entfernt.")
+    return jsonify(batch_public())
+
+
+@app.get("/api/batch/page/<int:index>/preview")
+def batch_page_preview(index: int) -> Response:
+    with batch_lock:
+        if not 0 <= index < len(batch_state["pages"]):
+            return jsonify({"error": "Diese Seite gibt es nicht."}), 404
+        page = batch_state["pages"][index]
+    path = Path(page["path"])
+    if not path.exists():
+        return jsonify({"error": "Seite nicht mehr vorhanden."}), 404
+    try:
+        payload, mimetype = render_preview(path)
+    except Exception:
+        return send_file(path, mimetype="application/pdf", max_age=0)
+    return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/batch/finish")
+def close_batch() -> Response:
+    if not batch_state["pages"]:
+        return jsonify({"error": "Der Stapel enthält keine Seiten."}), 400
+    if not scan_lock.acquire(blocking=False):
+        return jsonify({"error": "Ein Scan läuft gerade."}), 409
+
+    payload = request.get_json(silent=True) or {}
+    session_tags = list(dict.fromkeys(
+        str(tag).strip() for tag in payload.get("session_tags", []) if str(tag).strip()
+    ))
+    scan_state.update({"running": True, "last_error": None, "stage": "merge", "progress": 10, "trigger": "batch"})
+    threading.Thread(target=batch_finish_worker, args=(session_tags,), daemon=True).start()
+    return jsonify({"ok": True}), 202
+
+
+def batch_finish_worker(session_tags: list[str]) -> None:
+    try:
+        config = validate_config(store.get())
+        target = finish_batch(config, session_tags)
+        logs.progress("done", 100, file=target.name)
+        logs.publish("Stapel abgeschlossen.", "success")
+        notify_home_assistant(config, "success", target.name, None)
+    except Exception as error:
+        scan_state["last_error"] = str(error)
+        logs.progress("error", 100, error=str(error))
+        logs.publish(f"Stapel fehlgeschlagen: {error}", "error")
+        notify_home_assistant(store.get(), "error", None, str(error))
+    finally:
+        scan_state["running"] = False
+        scan_lock.release()
 
 
 @app.get("/api/preview")
@@ -1024,10 +1354,38 @@ def ha_state() -> Response:
         "last_finished": scan_state["last_finished"],
         "last_error": scan_state["last_error"],
         "trigger": scan_state["trigger"],
+        "batch_active": batch_state["active"],
+        "batch_pages": len(batch_state["pages"]),
         "version": APP_VERSION,
         "scanner_url": config["scanner_url"],
         "upload_to_paperless": config["upload_to_paperless"],
     })
+
+
+@app.post("/api/ha/batch")
+@require_api_key
+def ha_batch() -> Response:
+    """Let an automation open, close or discard a batch (e.g. two buttons)."""
+    action = str((request.get_json(silent=True) or {}).get("action", "")).lower()
+    if action == "start":
+        batch_clear()
+        with batch_lock:
+            batch_state["active"] = True
+        logs.publish("Stapel über Home Assistant gestartet.", "success")
+        return jsonify({"ok": True, **batch_public()})
+    if action == "cancel":
+        batch_clear()
+        logs.publish("Stapel über Home Assistant verworfen.", "warning")
+        return jsonify({"ok": True, **batch_public()})
+    if action == "finish":
+        if not batch_state["pages"]:
+            return jsonify({"ok": False, "error": "Der Stapel enthält keine Seiten."}), 400
+        if not scan_lock.acquire(blocking=False):
+            return jsonify({"ok": False, "error": "Ein Scan läuft gerade."}), 409
+        scan_state.update({"running": True, "last_error": None, "stage": "merge", "progress": 10, "trigger": "ha"})
+        threading.Thread(target=batch_finish_worker, args=([],), daemon=True).start()
+        return jsonify({"ok": True, "message": "Stapel wird abgeschlossen."}), 202
+    return jsonify({"ok": False, "error": "action muss start, finish oder cancel sein."}), 400
 
 
 @app.post("/api/ha/test")
