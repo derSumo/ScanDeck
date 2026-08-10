@@ -1,0 +1,72 @@
+name: Release
+
+# Veroeffentlicht zu jedem Versions-Tag ein GitHub-Release. Der Text stammt aus
+# CHANGELOG.md, damit Release und Changelog nie auseinanderlaufen.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Release-Text aus dem Changelog bauen
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$(cat VERSION)" ]; then
+            echo "Tag $GITHUB_REF_NAME passt nicht zur VERSION-Datei ($(cat VERSION))." >&2
+            exit 1
+          fi
+
+          # Alles zwischen der eigenen Ueberschrift und der naechsten Version.
+          # index() statt Regex, damit die Versionsnummer nicht maskiert werden muss.
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { flag = 1; next }
+            index($0, "## [") == 1 { flag = 0 }
+            index($0, "]: http") > 0 { flag = 0 }
+            flag { print }
+          ' CHANGELOG.md > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "Kein Changelog-Abschnitt fuer $version gefunden." >&2
+            exit 1
+          fi
+
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          # Ohne Interpolation in die Datei anhaengen: der Changelog enthaelt
+          # Backticks, die die Shell sonst als Kommando ausfuehren wuerde.
+          cat >> notes.md <<EOF
+          ## Installation
+
+          \`\`\`bash
+          docker run -d --name scandeck -p 8080:8080 \\
+            -v ./data:/data -v ./scans:/scans \\
+            --restart unless-stopped \\
+            ghcr.io/${owner}/scandeck:${version}
+          \`\`\`
+
+          Alternativ mit der [docker-compose.yaml](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docker-compose.yaml) aus dem Repository.
+
+          **Image:** \`ghcr.io/${owner}/scandeck:${version}\` — gebaut für linux/amd64 und linux/arm64.
+
+          **Ersteinrichtung:** Nach dem Start \`http://<host>:8080\` öffnen; der Assistent fragt Scanner, Paperless-ngx, Format und Automatisierung ab.
+          EOF
+
+          cat notes.md
+
+      - name: Release anlegen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "ScanDeck $version" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "ScanDeck $version" --notes-file notes.md
+          fi

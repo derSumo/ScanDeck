@@ -13,6 +13,8 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-10
+
 ### Hinzugefügt
 
 - Versionsanzeige neben dem Logo sowie eine Versionskarte in den Einstellungen.
@@ -27,7 +29,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ### Geändert
 
-- `compose.yaml` heißt jetzt `docker-compose.yaml` und zieht das veröffentlichte Image, statt lokal zu bauen. Der Build-Block bleibt auskommentiert erhalten.
+- `compose.yaml` heißt jetzt `docker-compose.yaml` und zieht das veröffentlichte Image, statt lokal zu bauen.
 - README mit direkterem Einstieg und `docker run`-Variante.
 
 ## [1.0.0] - 2026-08-10
@@ -53,5 +55,6 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/derSumo/ScanDeck/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/derSumo/ScanDeck/releases/tag/v1.0.0
