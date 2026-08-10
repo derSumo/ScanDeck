@@ -1,0 +1,24 @@
+services:
+  scandeck:
+    build:
+      context: .
+      args:
+        APP_VERSION: "1.0.0"
+    image: scandeck:1.0.0
+    container_name: scandeck
+    ports:
+      - "8080:8080"
+    environment:
+      APP_DATA_DIR: /data
+      SCAN_OUTPUT_DIR: /scans
+      # Nothing is preconfigured: the first start opens the setup wizard and
+      # persists everything to ./data/config.json. These optional variables only
+      # prefill the wizard for an unattended rollout.
+      # SCANNER_URL: https://10.0.0.31:443
+      # PAPERLESS_URL: http://paperless:8000
+      # PAPERLESS_TOKEN: replace-with-your-token
+      # DISCOVERY_SUBNET: 10.0.0.0/24
+    volumes:
+      - ./data:/data
+      - ./scans:/scans
+    restart: unless-stopped

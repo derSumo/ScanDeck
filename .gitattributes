@@ -1,0 +1,6 @@
+# Einheitliche Zeilenenden im Repository, LF im Container.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary

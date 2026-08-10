@@ -1,0 +1,30 @@
+# Laufzeitdaten (enthalten Tokens und gescannte Dokumente)
+data/
+scans/
+scan*.jpg
+scan*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editoren
+.vscode/
+.idea/
+*.swp
+*~
+
+# Betriebssystem
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Lokale Overrides
+.env
+*.local
+compose.override.yaml
+docker-compose.override.yml

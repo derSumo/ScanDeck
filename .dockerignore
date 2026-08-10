@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+scan*.jpg
+scan*.pdf
+data/
+scans/
+assets/
+.git/
+.gitignore
+.venv/
+venv/
+.vscode/
+.idea/
+CHANGELOG.md
+README.md
+main.py
