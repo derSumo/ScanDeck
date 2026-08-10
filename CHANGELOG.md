@@ -13,6 +13,13 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-10
+
+### Behoben
+
+- Installierte Apps (Startbildschirm auf iOS und Android) zeigten weiterhin die Oberfläche der ersten Installation: Der Service Worker trug seit 1.0.0 denselben Cache-Namen und lieferte Stylesheet und Skript grundsätzlich aus dem Cache. Damit kam kein einziges Design-Update dort an — sichtbar zuletzt daran, dass sich das Stapel-Fenster auf dem iPhone nicht schließen ließ, auf dem Desktop aber schon.
+- Der Cache-Name enthält jetzt die Version, alte Caches werden beim Aktivieren gelöscht, Stylesheet und Skript werden mit Versionsnummer angefragt, und statische Dateien werden im Hintergrund erneuert (stale-while-revalidate). Eine neue Version übernimmt die App außerdem sofort, statt auf einen späteren Start zu warten.
+
 ## [1.4.0] - 2026-08-10
 
 ### Behoben
@@ -93,7 +100,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/derSumo/ScanDeck/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/derSumo/ScanDeck/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/derSumo/ScanDeck/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/derSumo/ScanDeck/compare/v1.1.0...v1.2.0

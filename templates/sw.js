@@ -1,9 +1,14 @@
-/* Scan Deck service worker: app shell offline, API always live. */
-const SHELL_CACHE = "scandeck-shell-v3";
+/* Scan Deck service worker: app shell offline, API always live.
+   Diese Datei wird von Flask ausgeliefert, damit die Version eingesetzt werden
+   kann. Der Cache-Name enthaelt sie: jede neue Version bekommt einen eigenen
+   Cache, alte werden beim Aktivieren geloescht. Ohne das wuerde eine
+   installierte App das CSS und JS der ersten Installation behalten. */
+const VERSION = "{{ version }}";
+const SHELL_CACHE = `scandeck-shell-${VERSION}`;
 const SHELL_ASSETS = [
   "/",
-  "/static/app.css",
-  "/static/app.js",
+  `/static/app.css?v=${VERSION}`,
+  `/static/app.js?v=${VERSION}`,
   "/manifest.webmanifest",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",
@@ -46,17 +51,20 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Stale-while-revalidate: aus dem Cache antworten, aber im Hintergrund
+  // erneuern. Damit landet eine Aenderung spaetestens beim naechsten Start,
+  // auch wenn die Versionsnummer einmal gleich bleibt.
   event.respondWith(
-    caches.match(request).then(
-      (cached) =>
-        cached ||
-        fetch(request).then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(SHELL_CACHE).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
+    caches.open(SHELL_CACHE).then((cache) =>
+      cache.match(request).then((cached) => {
+        const network = fetch(request)
+          .then((response) => {
+            if (response.ok) cache.put(request, response.clone());
+            return response;
+          })
+          .catch(() => cached);
+        return cached || network;
+      })
     )
   );
 });

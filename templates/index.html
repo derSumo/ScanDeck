@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="icon" href="{{ url_for('static', filename='icons/favicon-32.png') }}" sizes="32x32">
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v={{ version }}">
   </head>
   <body data-view="dashboard">
     <div class="ambient" aria-hidden="true"><span></span><span></span></div>
@@ -369,6 +369,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v={{ version }}"></script>
   </body>
 </html>

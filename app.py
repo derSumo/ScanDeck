@@ -1129,7 +1129,7 @@ def render_preview(file_path: Path, rotation: int = 0) -> tuple[bytes, str]:
 
 @app.get("/")
 def index() -> str:
-    return render_template("index.html")
+    return render_template("index.html", version=APP_VERSION)
 
 
 @app.get("/manifest.webmanifest")
@@ -1141,8 +1141,10 @@ def manifest() -> Response:
 
 @app.get("/sw.js")
 def service_worker() -> Response:
-    # Served from the root so the worker can control the whole origin.
-    response = send_from_directory(app.static_folder, "sw.js")
+    # Served from the root so the worker can control the whole origin, and
+    # rendered so the cache name carries the version: without that an installed
+    # app keeps the stylesheet it was first installed with.
+    response = Response(render_template("sw.js", version=APP_VERSION))
     response.headers["Content-Type"] = "application/javascript"
     response.headers["Cache-Control"] = "no-cache"
     return response

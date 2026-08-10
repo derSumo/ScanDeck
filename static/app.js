@@ -1352,5 +1352,20 @@ document.addEventListener("visibilitychange", () => {
 });
 
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+  window.addEventListener("load", async () => {
+    try {
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      // Ohne das zeigt eine installierte App weiter die alte Oberflaeche, bis
+      // sie irgendwann von selbst neu startet.
+      registration.update().catch(() => {});
+      let reloading = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (reloading) return;
+        reloading = true;
+        window.location.reload();
+      });
+    } catch {
+      /* ohne Service Worker laeuft die App normal weiter */
+    }
+  });
 }
