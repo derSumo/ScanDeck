@@ -102,6 +102,32 @@ Während eines Stapels erscheint bewusst keine Vollbild-Vorschau nach jeder Seit
 
 Das Format des Stapels ist immer PDF, unabhängig von der Formateinstellung. Einzelne Seiten dürfen gemischt sein (PDF vom Scanner oder JPEG), sie werden beim Zusammenführen vereinheitlicht. Auch der automatische Einzug (ADF) funktioniert im Stapel: Er liefert pro Scan mehrere Seiten, die alle angehängt werden.
 
+### Verlauf und Warteschlange
+
+Der Reiter **Verlauf** zeigt jeden Scan mit Vorschaubild und dem, was daraus geworden ist. ScanDeck bleibt nämlich dran, bis Paperless-ngx bestätigt hat:
+
+- **Wartet auf Upload** — Paperless war nicht erreichbar. ScanDeck versucht es von selbst erneut, mit wachsendem Abstand (30 s, 2 min, 5 min, 15 min, dann stündlich). Nichts geht verloren, auch wenn dein Server gerade neu startet.
+- **Wird verarbeitet** — die Datei ist drüben, Paperless arbeitet noch.
+- **In Paperless** — bestätigt, mit Dokumentnummer.
+- **Duplikat** — Paperless kennt das Dokument schon und hat es abgelehnt. Früher hättest du das nie erfahren.
+- **Fehlgeschlagen** — mit Begründung von Paperless.
+
+Pro Eintrag kannst du erneut senden, die Datei öffnen oder Eintrag und Datei löschen.
+
+### Aufräumen
+
+Unter *Einstellungen → Aufräumen* lässt sich einschalten, dass lokale Kopien nach einer Wartezeit (Standard 24 Stunden) gelöscht werden. Damit läuft der Ordner nicht voll, obwohl er auf einem Volume liegt.
+
+Gelöscht wird ausschließlich, was Paperless **bestätigt** hat. Alles, was noch in der Warteschlange hängt, abgelehnt wurde oder als Duplikat gilt, bleibt liegen — die Wartezeit kann eine offene Datei also nie wegräumen. Der Eintrag im Verlauf bleibt erhalten und zeigt an, dass die lokale Kopie aufgeräumt wurde.
+
+### Extras
+
+Damit das Dashboard schlank bleibt, sind Zusatzfunktionen unter *Einstellungen → Extras* einzeln zuschaltbar:
+
+- **Korrespondent und Dokumenttyp beim Scannen wählen** — ScanDeck lädt beide Listen aus deiner Paperless-Instanz. Die Auswahl gilt für den nächsten Scan und wird nicht dauerhaft gespeichert, spart aber das spätere Nachsortieren.
+- **Schnell-Tags** — die meistgenutzten Tags aus Paperless als antippbare Vorschläge über dem Eingabefeld. Eigene Tags lassen sich weiterhin frei eintippen.
+- **Scanner beim Öffnen aufwecken** — siehe Geschwindigkeit.
+
 **Einstellungen** verwaltet Scanner, Paperless-ngx, Ausgabe, Standard-Tags, Home Assistant und das Zurücksetzen der Konfiguration.
 
 - Unter **Scanner** genügt ein Klick auf *Netzwerk automatisch durchsuchen*. ScanDeck rät das Netz nicht, sondern leitet es aus der Adresse des Geräts ab, mit dem du gerade die Oberfläche geöffnet hast — das steht im selben Netz wie der Scanner. Zusätzlich werden die Netze deiner Paperless-Adresse und die üblichen Router-Standards (`192.168.0.x`, `192.168.1.x`, `192.168.178.x`, `10.0.0.x`) geprüft, bis etwas gefunden wird. Docker-eigene Netze werden dabei ans Ende gestellt, weil dort nie ein Scanner steht. Manuell geht weiterhin über *Netzwerk manuell angeben*. Die Suche prüft ausschließlich `ScannerCapabilities` und löst keinen Scan aus.
@@ -154,7 +180,9 @@ Ein Scan besteht aus drei Anfragen an den Scanner: Status abfragen, Auftrag anle
 
 ScanDeck merkt sich außerdem, wie lange dein Gerät für jede Kombination aus Quelle, Auflösung, Farbmodus und Format braucht, und speichert das in `./data/timings.json`. Ab dem zweiten Scan eines Profils läuft der Fortschrittsbalken deshalb in echter Zeit statt geschätzt, und die Anzeige nennt die verbleibenden Sekunden. Gemessen wird gleitend, langsame Ausreißer verziehen den Wert also nicht dauerhaft; dauert ein Scan länger als erwartet, kriecht der Balken weiter, statt stehen zu bleiben. Die Datei kann jederzeit gelöscht werden, dann lernt ScanDeck neu.
 
-Der Rest der Wartezeit ist der Scanner selbst: Lampe aufwärmen, Schlitten fahren, Bild übertragen. Zwei Stellschrauben helfen spürbar:
+Der Rest der Wartezeit ist der Scanner selbst: Lampe aufwärmen, Schlitten fahren, Bild übertragen. Gegen den Schlafmodus hilft die Option *Scanner beim Öffnen der App aufwecken*: ScanDeck fragt dann im Hintergrund einmal den Gerätestatus ab, sobald du die App öffnest oder zu ihr zurückkehrst. Während du noch Tags tippst, ist das Gerät schon wach.
+
+Zwei weitere Stellschrauben helfen spürbar:
 
 - **Auflösung** — 600 dpi dauert grob viermal so lange wie 300 dpi und bringt bei normalem Papier nichts. Für Briefe reichen 200–300 dpi.
 - **Farbmodus** — Graustufen überträgt ein Drittel der Daten von Farbe.

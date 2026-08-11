@@ -75,6 +75,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "title_prefix": "Scan",
     "preview_seconds": 10,
     "update_check": True,
+    # Extras bleiben aus, damit die Startoberflaeche schlank bleibt.
+    "metadata_enabled": False,
+    "quick_tags_enabled": False,
+    "cleanup_enabled": False,
+    "cleanup_hours": 24,
+    "prewarm_enabled": True,
     "setup_complete": False,
     "ha_enabled": False,
     "ha_api_key": "",
@@ -228,6 +234,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["create_missing_tags"] = bool(config.get("create_missing_tags", True))
     config["title_prefix"] = str(config.get("title_prefix", "Scan")).strip() or "Scan"
     config["update_check"] = bool(config.get("update_check"))
+    config["metadata_enabled"] = bool(config.get("metadata_enabled"))
+    config["quick_tags_enabled"] = bool(config.get("quick_tags_enabled"))
+    config["cleanup_enabled"] = bool(config.get("cleanup_enabled"))
+    config["prewarm_enabled"] = bool(config.get("prewarm_enabled"))
+    config["cleanup_hours"] = max(1, min(8760, int(config.get("cleanup_hours", 24) or 24)))
     config["setup_complete"] = bool(config.get("setup_complete"))
     config["ha_enabled"] = bool(config.get("ha_enabled"))
     config["ha_api_key"] = str(config.get("ha_api_key", "")).strip()
@@ -413,6 +424,106 @@ scanner_session.mount(
     "http://",
     requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0),
 )
+
+
+class JobStore:
+    """Every scan and what became of it, so nothing gets lost silently.
+
+    A scan is only ever deleted once Paperless confirmed the document. Until
+    then the entry stays in the queue and is retried, which also means the
+    cleanup can never remove a file whose upload is still open.
+    """
+
+    # pending  -> waiting for its (first or next) upload attempt
+    # processing -> Paperless accepted the file, task is running
+    # success  -> document exists in Paperless, file may be cleaned up
+    # duplicate/failed -> needs a decision, file is kept
+    # local    -> upload is switched off, file is kept
+    OPEN_STATES = ("pending", "processing")
+    RETRY_DELAYS = (30, 120, 300, 900, 3600)  # seconds, then hourly
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._jobs = self._load()
+
+    def _load(self) -> list[dict[str, Any]]:
+        try:
+            stored = json.loads(self.path.read_text(encoding="utf-8"))
+            return stored if isinstance(stored, list) else []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+
+    def _write(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self._jobs[-500:], indent=2), encoding="utf-8")
+        except OSError as error:
+            print(f"ScanDeck: Verlauf nicht gespeichert: {error}", file=sys.stderr, flush=True)
+
+    def add(self, file_path: Path, status: str, pages: int = 1, tags: list[str] | None = None) -> dict[str, Any]:
+        job = {
+            "id": secrets.token_hex(8),
+            "name": file_path.name,
+            "path": str(file_path),
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            "pages": pages,
+            "tags": tags or [],
+            "task_id": None,
+            "document_id": None,
+            "error": None,
+            "attempts": 0,
+            "next_attempt": 0.0,
+            "confirmed_at": None,
+            "file_deleted": False,
+        }
+        with self._lock:
+            self._jobs.append(job)
+            self._write()
+        return job.copy()
+
+    def update(self, job_id: str, **values: Any) -> dict[str, Any] | None:
+        with self._lock:
+            for job in self._jobs:
+                if job["id"] == job_id:
+                    job.update(values)
+                    self._write()
+                    return job.copy()
+        return None
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return next((job.copy() for job in self._jobs if job["id"] == job_id), None)
+
+    def remove(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            for index, job in enumerate(self._jobs):
+                if job["id"] == job_id:
+                    removed = self._jobs.pop(index)
+                    self._write()
+                    return removed
+        return None
+
+    def list(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            return [job.copy() for job in reversed(self._jobs[-limit:])]
+
+    def due(self, status: str) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            return [job.copy() for job in self._jobs
+                    if job["status"] == status and job.get("next_attempt", 0) <= now]
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return sum(1 for job in self._jobs if job["status"] in self.OPEN_STATES)
+
+    def schedule_retry(self, job_id: str, error: str) -> None:
+        job = self.get(job_id)
+        attempts = int(job["attempts"]) + 1 if job else 1
+        delay = self.RETRY_DELAYS[min(attempts - 1, len(self.RETRY_DELAYS) - 1)]
+        self.update(job_id, status="pending", attempts=attempts, error=error, next_attempt=time.time() + delay)
 
 
 class TimingStore:
@@ -737,11 +848,16 @@ class PaperlessClient:
         response.raise_for_status()
         self.log.publish("Paperless-ngx erreichbar und Token akzeptiert.", "success")
 
-    def upload(self, file_path: Path) -> None:
+    def upload(self, file_path: Path) -> str:
+        """Hand the file to Paperless and return the task id it answers with."""
         self._require_config()
         tag_ids = self._resolve_tags()
         data: list[tuple[str, str]] = [("title", f"{self.config['title_prefix']} {datetime.now():%Y-%m-%d %H:%M}")]
         data.extend(("tags", str(tag_id)) for tag_id in tag_ids)
+        for field in ("correspondent", "document_type"):
+            value = self.config.get(field)
+            if value:
+                data.append((field, str(value)))
         self.log.publish(f"Lade {file_path.name} nach Paperless-ngx hoch …")
         with file_path.open("rb") as document:
             response = requests.post(
@@ -753,7 +869,57 @@ class PaperlessClient:
             )
         response.raise_for_status()
         task_id = response.text.strip().strip('"')
-        self.log.publish(f"Paperless-ngx übernimmt das Dokument (Task: {task_id or 'gestartet'}).", "success")
+        self.log.publish(f"Paperless-ngx hat {file_path.name} angenommen, Verarbeitung läuft …", "success")
+        return task_id
+
+    def task_state(self, task_id: str) -> dict[str, Any]:
+        """Ask what became of an upload: accepted, duplicate or failed.
+
+        Paperless 3.x renamed these fields, so both spellings are accepted.
+        """
+        response = requests.get(f"{self.base_url}/api/tasks/?task_id={task_id}", headers=self.headers, timeout=20)
+        response.raise_for_status()
+        body = response.json()
+        items = body.get("results", body) if isinstance(body, dict) else body
+        if not items:
+            return {"status": "unknown"}
+        task = items[0]
+        status = str(task.get("status", "")).lower()
+        documents = task.get("related_document_ids") or []
+        single = task.get("related_document")
+        if single and not documents:
+            documents = [single]
+        message = str(task.get("result_data") or task.get("result") or task.get("status_display") or "")
+        return {
+            "status": status,
+            "document_id": documents[0] if documents else None,
+            "message": message,
+            "duplicate": "duplicate" in message.lower() or "bereits" in message.lower(),
+        }
+
+    def collections(self) -> dict[str, list[dict[str, Any]]]:
+        """Tags, correspondents and document types for the pickers."""
+        self._require_config()
+        result: dict[str, list[dict[str, Any]]] = {}
+        for key, endpoint, ordering in (
+            ("tags", "tags", "-document_count"),
+            ("correspondents", "correspondents", "-document_count"),
+            ("document_types", "document_types", "name"),
+        ):
+            response = requests.get(
+                f"{self.base_url}/api/{endpoint}/?page_size=100&ordering={ordering}",
+                headers=self.headers,
+                timeout=20,
+            )
+            response.raise_for_status()
+            body = response.json()
+            items = body.get("results", body) if isinstance(body, dict) else body
+            result[key] = [
+                {"id": item.get("id"), "name": item.get("name"), "count": item.get("document_count", 0)}
+                for item in items
+                if item.get("name")
+            ]
+        return result
 
     def _require_config(self) -> None:
         if not self.base_url or not self.config.get("paperless_token"):
@@ -792,6 +958,7 @@ app = Flask(__name__)
 logs = LogHub()
 store = ConfigStore(CONFIG_PATH)
 timings = TimingStore(APP_DATA_DIR / "timings.json")
+jobs = JobStore(APP_DATA_DIR / "jobs.json")
 scan_lock = threading.Lock()
 scan_state: dict[str, Any] = {
     "running": False,
@@ -829,6 +996,125 @@ def check_writable(directory: Path, label: str) -> None:
 
 check_writable(APP_DATA_DIR, "Konfigurationsverzeichnis")
 check_writable(Path(store.get()["output_dir"]), "Scan-Ablage")
+
+
+# --------------------------------------------------------------------------- #
+# Upload queue, Paperless confirmation and cleanup
+# --------------------------------------------------------------------------- #
+
+def queue_upload(file_path: Path, config: dict[str, Any], pages: int, tags: list[str]) -> dict[str, Any]:
+    """Record the scan, then try the upload right away."""
+    status = "pending" if config["upload_to_paperless"] else "local"
+    job = jobs.add(file_path, status, pages=pages, tags=tags)
+    if status == "pending":
+        attempt_upload(job["id"], config)
+    return jobs.get(job["id"]) or job
+
+
+def attempt_upload(job_id: str, config: dict[str, Any] | None = None) -> bool:
+    """One upload attempt. Failures stay in the queue instead of vanishing."""
+    job = jobs.get(job_id)
+    if not job:
+        return False
+    path = Path(job["path"])
+    if not path.exists():
+        jobs.update(job_id, status="failed", error="Datei ist nicht mehr vorhanden.")
+        return False
+
+    config = config or store.get()
+    try:
+        task_id = PaperlessClient(config, logs).upload(path)
+        jobs.update(job_id, status="processing", task_id=task_id or None, error=None, next_attempt=time.time() + 5)
+        if not task_id:
+            # Without a task id there is nothing to follow up on.
+            jobs.update(job_id, status="success", confirmed_at=datetime.now().isoformat(timespec="seconds"))
+        return True
+    except (requests.RequestException, RuntimeError) as error:
+        jobs.schedule_retry(job_id, str(error))
+        logs.publish(f"Upload von {job['name']} fehlgeschlagen, wird erneut versucht: {error}", "warning")
+        return False
+
+
+def follow_up_task(job: dict[str, Any], config: dict[str, Any]) -> None:
+    """Ask Paperless whether the document really made it."""
+    try:
+        state = PaperlessClient(config, logs).task_state(job["task_id"])
+    except (requests.RequestException, RuntimeError) as error:
+        jobs.update(job["id"], next_attempt=time.time() + 60, error=str(error))
+        return
+
+    status = state["status"]
+    if status in ("pending", "started", "received", "retry", "unknown"):
+        jobs.update(job["id"], next_attempt=time.time() + 10)
+        return
+
+    if status == "success":
+        jobs.update(
+            job["id"],
+            status="success",
+            document_id=state["document_id"],
+            error=None,
+            confirmed_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        document = f" als Dokument #{state['document_id']}" if state["document_id"] else ""
+        logs.publish(f"Paperless hat {job['name']}{document} angelegt.", "success")
+        return
+
+    duplicate = state["duplicate"]
+    jobs.update(
+        job["id"],
+        status="duplicate" if duplicate else "failed",
+        error=state["message"] or "Paperless hat das Dokument abgelehnt.",
+        confirmed_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    logs.publish(
+        f"Paperless hat {job['name']} " + ("als Duplikat abgelehnt." if duplicate else f"abgelehnt: {state['message']}"),
+        "warning" if duplicate else "error",
+    )
+
+
+def cleanup_uploaded(config: dict[str, Any]) -> None:
+    """Delete local copies of documents Paperless confirmed, after the grace period."""
+    if not config.get("cleanup_enabled"):
+        return
+    limit = datetime.now().timestamp() - config["cleanup_hours"] * 3600
+    for job in jobs.list(limit=500):
+        if job["status"] != "success" or job.get("file_deleted"):
+            continue
+        stamp = job.get("confirmed_at") or job.get("created")
+        try:
+            confirmed = datetime.fromisoformat(stamp).timestamp()
+        except (TypeError, ValueError):
+            continue
+        if confirmed > limit:
+            continue
+        path = Path(job["path"])
+        try:
+            existed = path.exists()
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            logs.publish(f"{path.name} konnte nicht gelöscht werden: {error}", "warning")
+            continue
+        jobs.update(job["id"], file_deleted=True)
+        if existed:
+            logs.publish(f"Lokale Kopie aufgeräumt: {job['name']}")
+
+
+def queue_worker() -> None:
+    """Retries, confirmations and cleanup — one calm loop, every 15 seconds."""
+    while True:
+        try:
+            config = store.get()
+            if config["upload_to_paperless"]:
+                for job in jobs.due("pending"):
+                    attempt_upload(job["id"], config)
+                for job in jobs.due("processing"):
+                    if job.get("task_id"):
+                        follow_up_task(job, config)
+            cleanup_uploaded(config)
+        except Exception as error:  # the worker must never die
+            print(f"ScanDeck: Warteschlange: {error}", file=sys.stderr, flush=True)
+        time.sleep(15)
 
 
 # --------------------------------------------------------------------------- #
@@ -963,14 +1249,14 @@ def finish_batch(config: dict[str, Any], session_tags: list[str]) -> Path:
         "last_finished": datetime.now().isoformat(timespec="seconds"),
     })
 
+    upload_config = {**config}
+    if session_tags:
+        upload_config["default_tags"] = list(dict.fromkeys(config["default_tags"] + session_tags))
     if config["upload_to_paperless"]:
         logs.progress("upload", 80)
-        upload_config = {**config}
-        if session_tags:
-            upload_config["default_tags"] = list(dict.fromkeys(config["default_tags"] + session_tags))
-        PaperlessClient(upload_config, logs).upload(target)
     else:
         logs.publish("Upload nach Paperless-ngx ist deaktiviert.", "warning")
+    queue_upload(target, upload_config, page_count, upload_config["default_tags"])
 
     batch_clear()
     return target
@@ -1002,7 +1288,8 @@ def start_scan_job(session_tags: list[str], trigger: str = "ui", overrides: dict
 def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]) -> None:
     try:
         config = store.get()
-        for key in ("source", "resolution", "color_mode", "output_format", "upload_to_paperless", "title_prefix"):
+        for key in ("source", "resolution", "color_mode", "output_format", "upload_to_paperless",
+                    "title_prefix", "correspondent", "document_type"):
             if key in overrides and overrides[key] not in (None, ""):
                 config[key] = overrides[key]
         config = validate_config(config)
@@ -1036,9 +1323,9 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
         })
         if config["upload_to_paperless"]:
             logs.progress("upload", 88)
-            PaperlessClient(config, logs).upload(file_path)
         else:
             logs.publish("Upload nach Paperless-ngx ist deaktiviert.", "warning")
+        queue_upload(file_path, config, 1, config["default_tags"])
         logs.progress("done", 100, file=file_path.name)
         logs.publish("Workflow abgeschlossen.", "success")
         notify_home_assistant(config, "success", file_path.name, None)
@@ -1215,6 +1502,7 @@ def state() -> Response:
         **scan_state,
         "setup_complete": store.get()["setup_complete"],
         "batch": batch_public(),
+        "queue": jobs.pending_count(),
     })
 
 
@@ -1387,14 +1675,17 @@ def close_batch() -> Response:
     session_tags = list(dict.fromkeys(
         str(tag).strip() for tag in payload.get("session_tags", []) if str(tag).strip()
     ))
+    metadata = {key: payload[key] for key in ("correspondent", "document_type")
+                if payload.get(key) not in (None, "")}
     scan_state.update({"running": True, "last_error": None, "stage": "merge", "progress": 10, "trigger": "batch"})
-    threading.Thread(target=batch_finish_worker, args=(session_tags,), daemon=True).start()
+    threading.Thread(target=batch_finish_worker, args=(session_tags, metadata), daemon=True).start()
     return jsonify({"ok": True}), 202
 
 
-def batch_finish_worker(session_tags: list[str]) -> None:
+def batch_finish_worker(session_tags: list[str], metadata: dict[str, Any] | None = None) -> None:
     try:
         config = validate_config(store.get())
+        config.update(metadata or {})
         target = finish_batch(config, session_tags)
         logs.progress("done", 100, file=target.name)
         logs.publish("Stapel abgeschlossen.", "success")
@@ -1431,6 +1722,93 @@ def preview_file() -> Response:
     path = Path(last_file)
     mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "image/jpeg"
     return send_file(path, mimetype=mimetype, as_attachment=False, download_name=path.name, max_age=0)
+
+
+@app.get("/api/history")
+def get_history() -> Response:
+    limit = max(1, min(200, int(request.args.get("limit", 40))))
+    entries = jobs.list(limit)
+    for entry in entries:
+        entry["exists"] = (not entry["file_deleted"]) and Path(entry["path"]).exists()
+        entry.pop("path", None)
+    return jsonify({"jobs": entries, "open": jobs.pending_count()})
+
+
+@app.get("/api/history/<job_id>/preview")
+def history_preview(job_id: str) -> Response:
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unbekannter Eintrag."}), 404
+    path = Path(job["path"])
+    if not path.exists():
+        return jsonify({"error": "Datei wurde bereits aufgeräumt."}), 404
+    try:
+        payload, mimetype = render_preview(path)
+    except Exception:
+        return send_file(path, mimetype="application/pdf", max_age=0)
+    return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/history/<job_id>/file")
+def history_file(job_id: str) -> Response:
+    job = jobs.get(job_id)
+    if not job or not Path(job["path"]).exists():
+        return jsonify({"error": "Datei wurde bereits aufgeräumt."}), 404
+    path = Path(job["path"])
+    mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "image/jpeg"
+    return send_file(path, mimetype=mimetype, download_name=path.name, max_age=0)
+
+
+@app.post("/api/history/<job_id>/retry")
+def history_retry(job_id: str) -> Response:
+    """Send a document to Paperless again — after a failure or on purpose."""
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unbekannter Eintrag."}), 404
+    if not Path(job["path"]).exists():
+        return jsonify({"error": "Die Datei wurde bereits aufgeräumt."}), 410
+    jobs.update(job_id, status="pending", next_attempt=0, error=None, attempts=0)
+    threading.Thread(target=attempt_upload, args=(job_id,), daemon=True).start()
+    return jsonify({"ok": True}), 202
+
+
+@app.delete("/api/history/<job_id>")
+def history_delete(job_id: str) -> Response:
+    job = jobs.remove(job_id)
+    if not job:
+        return jsonify({"error": "Unbekannter Eintrag."}), 404
+    try:
+        Path(job["path"]).unlink(missing_ok=True)
+    except OSError as error:
+        return jsonify({"error": str(error)}), 500
+    logs.publish(f"{job['name']} aus dem Verlauf gelöscht.")
+    return jsonify({"ok": True})
+
+
+@app.get("/api/paperless/collections")
+def paperless_collections() -> Response:
+    """Tags, correspondents and document types for the pickers."""
+    try:
+        return jsonify({"ok": True, **PaperlessClient(store.get(), logs).collections()})
+    except (requests.RequestException, RuntimeError) as error:
+        return jsonify({"ok": False, "error": str(error)}), 502
+
+
+@app.post("/api/scanner/prewarm")
+def prewarm() -> Response:
+    """Nudge the scanner awake while the user is still choosing settings."""
+    config = store.get()
+    if not config.get("prewarm_enabled") or not config.get("scanner_url") or scan_state["running"]:
+        return jsonify({"ok": False, "skipped": True})
+
+    def wake() -> None:
+        try:
+            ScannerClient(config, logs).status()
+        except Exception:
+            pass  # a sleeping or missing scanner must not produce noise
+
+    threading.Thread(target=wake, daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.get("/api/logs")
@@ -1509,7 +1887,8 @@ def ha_scan() -> Response:
     session_tags = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
     overrides = {
         key: payload[key]
-        for key in ("source", "resolution", "color_mode", "output_format", "upload_to_paperless", "title_prefix")
+        for key in ("source", "resolution", "color_mode", "output_format", "upload_to_paperless",
+                    "title_prefix", "correspondent", "document_type")
         if key in payload
     }
     if not start_scan_job(session_tags, "ha", overrides):
@@ -1560,7 +1939,7 @@ def ha_batch() -> Response:
         if not scan_lock.acquire(blocking=False):
             return jsonify({"ok": False, "error": "Ein Scan läuft gerade."}), 409
         scan_state.update({"running": True, "last_error": None, "stage": "merge", "progress": 10, "trigger": "ha"})
-        threading.Thread(target=batch_finish_worker, args=([],), daemon=True).start()
+        threading.Thread(target=batch_finish_worker, args=([], {}), daemon=True).start()
         return jsonify({"ok": True, "message": "Stapel wird abgeschlossen."}), 202
     return jsonify({"ok": False, "error": "action muss start, finish oder cancel sein."}), 400
 
@@ -1570,6 +1949,10 @@ def ha_batch() -> Response:
 def ha_test() -> Response:
     logs.publish("Home Assistant hat die Verbindung getestet.", "success")
     return jsonify({"ok": True, "message": "Verbindung steht."})
+
+
+# Erst starten, wenn alle Funktionen definiert sind.
+threading.Thread(target=queue_worker, daemon=True, name="scandeck-queue").start()
 
 
 if __name__ == "__main__":

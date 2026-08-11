@@ -196,8 +196,20 @@
           <button class="quick" data-quick="color_mode" type="button"><span>Farbe</span><b id="quick-color">Farbe</b></button>
         </div>
 
+        <section id="metadata-card" class="card" hidden>
+          <div class="card-head"><h2>Ablage in Paperless</h2><button id="metadata-reload" class="btn tiny ghost" type="button">Neu laden</button></div>
+          <label class="field"><span>Korrespondent</span>
+            <select id="correspondent"><option value="">— nicht setzen —</option></select>
+          </label>
+          <label class="field"><span>Dokumenttyp</span>
+            <select id="document-type"><option value="">— nicht setzen —</option></select>
+          </label>
+          <p class="hint">Gilt für den nächsten Scan und wird nicht dauerhaft gespeichert.</p>
+        </section>
+
         <section class="card">
           <div class="card-head"><h2>Tags für diesen Scan</h2></div>
+          <div id="quick-tags" class="chips quick-tags" hidden></div>
           <div id="session-tag-list" class="chips"></div>
           <div class="chip-input"><input id="session-tag-input" type="text" placeholder="z. B. Rechnung"><button id="session-tag-add" type="button" aria-label="Tag hinzufügen">+</button></div>
           <p class="hint" id="default-tags-hint"></p>
@@ -214,6 +226,13 @@
           <button class="card-head toggle" id="log-toggle" type="button" aria-expanded="false"><h2>Live-Protokoll</h2><span class="chev" aria-hidden="true"></span></button>
           <div id="log-lines" class="log" hidden><p class="log-empty">Noch keine Ereignisse</p></div>
         </section>
+      </section>
+
+      <!-- Verlauf -->
+      <section id="view-history" class="view" aria-label="Verlauf">
+        <div class="view-head"><h1>Verlauf</h1><button id="history-reload" class="btn tiny ghost" type="button">Aktualisieren</button></div>
+        <p class="hint" id="history-summary">Wird geladen …</p>
+        <div id="history-list" class="history-list"></div>
       </section>
 
       <!-- Settings -->
@@ -279,6 +298,21 @@
         </section>
 
         <section class="card">
+          <div class="card-head"><h2>Extras</h2></div>
+          <label class="switch"><input id="metadata-enabled" type="checkbox"><i></i><span>Korrespondent und Dokumenttyp beim Scannen wählen</span></label>
+          <label class="switch"><input id="quick-tags-enabled" type="checkbox"><i></i><span>Schnell-Tags aus Paperless anbieten</span></label>
+          <label class="switch"><input id="prewarm-enabled" type="checkbox"><i></i><span>Scanner beim Öffnen der App aufwecken</span></label>
+          <p class="hint">Zusatzfunktionen bleiben aus, damit das Dashboard schlank bleibt.</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>Aufräumen</h2></div>
+          <label class="switch"><input id="cleanup-enabled" type="checkbox"><i></i><span>Lokale Kopien nach bestätigtem Upload löschen</span></label>
+          <label class="field"><span>Wartezeit in Stunden</span><input id="cleanup-hours" type="number" min="1" max="8760" step="1" inputmode="numeric"></label>
+          <p class="hint">Gelöscht wird nur, was Paperless bestätigt hat. Alles, was noch in der Warteschlange hängt, abgelehnt wurde oder als Duplikat gilt, bleibt liegen.</p>
+        </section>
+
+        <section class="card">
           <div class="card-head"><h2>Standard-Tags</h2></div>
           <div id="default-tag-list" class="chips"></div>
           <div class="chip-input"><input id="default-tag-input" type="text" placeholder="Tag hinzufügen"><button id="default-tag-add" type="button" aria-label="Tag hinzufügen">+</button></div>
@@ -322,6 +356,11 @@
       <button class="tab active" data-view="dashboard" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h7V4H4v9Zm0 7h7v-5H4v5Zm9 0h7v-9h-7v9Zm0-16v5h7V4h-7Z"/></svg>
         <span>Dashboard</span>
+      </button>
+      <button class="tab" data-view="history" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3a9 9 0 1 0 8.94 10H19.9A7 7 0 1 1 13 5v3l4.5-4L13 0v3Z"/><path d="M12 8v5l4 2 .8-1.6L13.5 12V8H12Z"/></svg>
+        <span>Verlauf</span>
+        <em id="queue-badge" class="tab-badge" hidden>0</em>
       </button>
       <button class="tab" data-view="settings" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7Zm7.4-2.6.1-.9-.1-.9 1.9-1.5-1.9-3.2-2.3.9a7 7 0 0 0-1.6-.9L15.1 4h-3.7l-.4 2.4c-.6.2-1.1.5-1.6.9l-2.3-.9-1.9 3.2 1.9 1.5-.1.9.1.9-1.9 1.5 1.9 3.2 2.3-.9c.5.4 1 .7 1.6.9l.4 2.4h3.7l.4-2.4c.6-.2 1.1-.5 1.6-.9l2.3.9 1.9-3.2-1.9-1.5Z"/></svg>

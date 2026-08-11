@@ -40,6 +40,7 @@ const state = {
   wizardTags: [],
   running: false,
   batch: { active: false, pages: [], replace_index: null },
+  collections: { loaded: false },
   progressTitle: "Scan läuft",
   eta: null,
   etaAt: 0,
@@ -285,6 +286,13 @@ function applyConfig(config) {
     $("#about-version").textContent = `ScanDeck ${config.version}`;
   }
   setValue("update-check-enabled", config.update_check);
+  setValue("metadata-enabled", config.metadata_enabled);
+  setValue("quick-tags-enabled", config.quick_tags_enabled);
+  setValue("prewarm-enabled", config.prewarm_enabled);
+  setValue("cleanup-enabled", config.cleanup_enabled);
+  setValue("cleanup-hours", config.cleanup_hours ?? 24);
+  $("#metadata-card").hidden = !config.metadata_enabled;
+  $("#quick-tags").hidden = !config.quick_tags_enabled;
 
   setSegment("output-format", config.output_format);
   setSegment("source", config.source);
@@ -317,6 +325,11 @@ function collectConfig() {
     ha_enabled: getValue("ha-enabled"),
     ha_webhook_url: getValue("ha-webhook-url"),
     update_check: getValue("update-check-enabled"),
+    metadata_enabled: getValue("metadata-enabled"),
+    quick_tags_enabled: getValue("quick-tags-enabled"),
+    prewarm_enabled: getValue("prewarm-enabled"),
+    cleanup_enabled: getValue("cleanup-enabled"),
+    cleanup_hours: Number(getValue("cleanup-hours") || 24),
   };
 }
 
@@ -637,12 +650,206 @@ async function finishBatch() {
     state.progressTitle = "Stapel wird abgeschlossen";
     setScanning(true);
     setProgress(10, "merge");
-    await api("/api/batch/finish", { method: "POST", body: JSON.stringify({ session_tags: state.sessionTags }) });
+    await api("/api/batch/finish", {
+      method: "POST",
+      body: JSON.stringify({ session_tags: state.sessionTags, ...scanMetadata() }),
+    });
   } catch (error) {
     setScanning(false);
     hideProgress();
     toast(error.message, "error");
   }
+}
+
+/* --- history ------------------------------------------------------------- */
+
+const STATUS_LABEL = {
+  success: "In Paperless",
+  processing: "Wird verarbeitet",
+  pending: "Wartet auf Upload",
+  failed: "Fehlgeschlagen",
+  duplicate: "Duplikat",
+  local: "Nur lokal",
+};
+
+const HISTORY_ICONS = {
+  retry: '<path d="M20 8a8 8 0 1 0 1.5 6"/><path d="M20 3v5h-5"/>',
+  open: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  delete: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
+};
+
+function historyButton(kind, title, onClick, href) {
+  const element = document.createElement(href ? "a" : "button");
+  if (href) {
+    element.href = href;
+    element.target = "_blank";
+    element.rel = "noopener";
+  } else {
+    element.type = "button";
+    element.addEventListener("click", onClick);
+  }
+  element.className = kind;
+  element.title = title;
+  element.setAttribute("aria-label", title);
+  element.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${HISTORY_ICONS[kind]}</svg>`;
+  return element;
+}
+
+function renderHistory(data) {
+  const list = $("#history-list");
+  list.replaceChildren();
+  const entries = data.jobs || [];
+
+  $("#history-summary").textContent = entries.length
+    ? data.open
+      ? `${entries.length} Scans · ${data.open} noch offen`
+      : `${entries.length} Scans · alles übertragen`
+    : "Noch keine Scans.";
+
+  entries.forEach((job) => {
+    const row = document.createElement("div");
+    const open = job.status === "pending" || job.status === "processing";
+    const bad = job.status === "failed";
+    row.className = `history-item${open ? " is-open" : ""}${bad ? " is-bad" : ""}`;
+
+    let thumb;
+    if (job.exists) {
+      thumb = document.createElement("img");
+      thumb.className = "history-thumb";
+      thumb.src = `/api/history/${job.id}/preview`;
+      thumb.alt = "";
+      thumb.loading = "lazy";
+    } else {
+      thumb = document.createElement("div");
+      thumb.className = "history-thumb missing";
+      thumb.textContent = "✓";
+      thumb.title = "Lokale Kopie wurde aufgeräumt";
+    }
+
+    const main = document.createElement("div");
+    main.className = "history-main";
+    main.append(Object.assign(document.createElement("b"), { textContent: job.name }));
+
+    const meta = document.createElement("span");
+    meta.className = "history-meta";
+    const badge = document.createElement("span");
+    badge.className = `badge ${job.status}`;
+    badge.textContent = STATUS_LABEL[job.status] || job.status;
+    const when = new Date(job.created).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" });
+    meta.append(badge, document.createTextNode(` ${when}`));
+    if (job.pages > 1) meta.append(document.createTextNode(` · ${job.pages} Seiten`));
+    if (job.document_id) meta.append(document.createTextNode(` · #${job.document_id}`));
+    main.append(meta);
+
+    if (job.error) {
+      main.append(
+        Object.assign(document.createElement("span"), { className: "history-error", textContent: job.error, title: job.error })
+      );
+    }
+
+    const tools = document.createElement("div");
+    tools.className = "history-tools";
+    if (job.exists) {
+      tools.append(historyButton("retry", "Erneut an Paperless senden", () => retryJob(job.id)));
+      tools.append(historyButton("open", "Datei öffnen", null, `/api/history/${job.id}/file`));
+    }
+    tools.append(historyButton("delete", "Eintrag und Datei löschen", () => deleteJob(job.id, job.name)));
+
+    row.append(thumb, main, tools);
+    list.append(row);
+  });
+}
+
+async function loadHistory() {
+  try {
+    renderHistory(await api("/api/history"));
+  } catch (error) {
+    $("#history-summary").textContent = error.message;
+  }
+}
+
+async function retryJob(id) {
+  try {
+    await api(`/api/history/${id}/retry`, { method: "POST", body: "{}" });
+    toast("Wird erneut gesendet");
+    setTimeout(loadHistory, 1200);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function deleteJob(id, name) {
+  if (!window.confirm(`${name} löschen? Die lokale Datei wird mit entfernt.`)) return;
+  try {
+    await api(`/api/history/${id}`, { method: "DELETE" });
+    loadHistory();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/* --- Paperless pickers --------------------------------------------------- */
+
+function fillSelect(id, items, selected) {
+  const select = document.getElementById(id);
+  const keep = selected ?? select.value;
+  select.replaceChildren(Object.assign(document.createElement("option"), { value: "", textContent: "— nicht setzen —" }));
+  items.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = String(item.id);
+    option.textContent = item.count ? `${item.name} (${item.count})` : item.name;
+    select.append(option);
+  });
+  select.value = keep || "";
+}
+
+function renderQuickTags(tags) {
+  const box = $("#quick-tags");
+  box.replaceChildren();
+  tags.slice(0, 12).forEach((tag) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = tag.name;
+    button.className = state.sessionTags.includes(tag.name) ? "used" : "";
+    button.addEventListener("click", () => {
+      if (state.sessionTags.includes(tag.name)) {
+        state.sessionTags = state.sessionTags.filter((item) => item !== tag.name);
+      } else {
+        state.sessionTags.push(tag.name);
+      }
+      renderTags();
+      renderQuickTags(state.collections.tags || []);
+    });
+    box.append(button);
+  });
+  box.hidden = !tags.length;
+}
+
+async function loadCollections(force = false) {
+  const config = state.config;
+  if (!config.metadata_enabled && !config.quick_tags_enabled) return;
+  if (state.collections.loaded && !force) return;
+  try {
+    const data = await api("/api/paperless/collections");
+    state.collections = { ...data, loaded: true };
+    if (config.metadata_enabled) {
+      fillSelect("correspondent", data.correspondents || []);
+      fillSelect("document-type", data.document_types || []);
+    }
+    if (config.quick_tags_enabled) renderQuickTags(data.tags || []);
+  } catch (error) {
+    if (force) toast(error.message, "error");
+  }
+}
+
+function scanMetadata() {
+  if (!state.config.metadata_enabled) return {};
+  const meta = {};
+  const correspondent = getValue("correspondent");
+  const documentType = getValue("document-type");
+  if (correspondent) meta.correspondent = Number(correspondent);
+  if (documentType) meta.document_type = Number(documentType);
+  return meta;
 }
 
 /* --- update check -------------------------------------------------------- */
@@ -693,6 +900,7 @@ async function checkForUpdate(force = false) {
 
 function activateView(name) {
   document.body.dataset.view = name;
+  if (name === "history") loadHistory();
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === name));
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -778,7 +986,10 @@ async function startScan() {
     state.progressTitle = state.batch?.active ? "Seite wird gescannt" : "Scan läuft";
     setScanning(true);
     setProgress(2, "start");
-    await api("/api/scan", { method: "POST", body: JSON.stringify({ session_tags: state.sessionTags }) });
+    await api("/api/scan", {
+      method: "POST",
+      body: JSON.stringify({ session_tags: state.sessionTags, overrides: scanMetadata() }),
+    });
   } catch (error) {
     setScanning(false);
     hideProgress();
@@ -868,6 +1079,7 @@ function handleProgress(event) {
       } else {
         showPreview(event.file);
         loadBatch().catch(() => {});
+        loadHistory().catch(() => {});
       }
       refreshState().catch(() => {});
     }, 620);
@@ -900,6 +1112,11 @@ function connectEvents() {
 async function refreshState() {
   const scanState = await api("/api/state");
   renderLastScan(scanState);
+  const badge = $("#queue-badge");
+  badge.hidden = !scanState.queue;
+  badge.textContent = String(scanState.queue || 0);
+  if (document.body.dataset.view === "history" && scanState.queue !== state.queue) loadHistory();
+  state.queue = scanState.queue;
   if (scanState.batch) {
     // Keeps a second device (or a batch driven by Home Assistant) in sync.
     const changed = JSON.stringify(scanState.batch) !== JSON.stringify(state.batch);
@@ -1204,6 +1421,20 @@ bindDiscovery("discover-manual", "discovery-subnet", "discovery-results", "scann
 bindDiscovery("wiz-discover", "wiz-subnet", "wiz-devices", "wiz-scanner-url", true);
 bindDiscovery("wiz-discover-manual", "wiz-subnet", "wiz-devices", "wiz-scanner-url", false);
 
+$("#history-reload").addEventListener("click", loadHistory);
+$("#metadata-reload").addEventListener("click", () => loadCollections(true));
+$$("#metadata-enabled, #quick-tags-enabled").forEach((toggle) =>
+  toggle.addEventListener("change", async () => {
+    try {
+      applyConfig(await saveSettings(false));
+      state.collections.loaded = false;
+      await loadCollections(true);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  })
+);
+
 $("#batch-toggle").addEventListener("change", toggleBatch);
 $("#batch-help-toggle").addEventListener("click", () => {
   const help = $("#batch-help");
@@ -1336,6 +1567,8 @@ loadConfig()
   .then(async (config) => {
     await refreshState().catch(() => {});
     checkForUpdate().catch(() => {});
+    loadCollections().catch(() => {});
+    prewarmScanner();
     if (params.get("action") === "scan" && config.setup_complete) startScan();
   })
   .catch((error) => toast(error.message, "error"));
@@ -1348,8 +1581,20 @@ setInterval(() => refreshState().catch(() => {}), 4000);
 
 // Keep the UI honest after the phone wakes the PWA back up.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshState().catch(() => {});
+  if (document.hidden) return;
+  refreshState().catch(() => {});
+  prewarmScanner();
 });
+
+// Weckt den Scanner, waehrend der Nutzer noch waehlt: HP-Geraete schlafen ein
+// und brauchen sonst beim ersten Scan spuerbar laenger.
+function prewarmScanner() {
+  if (!state.config.prewarm_enabled || !state.config.scanner_url || state.running) return;
+  if (Date.now() - (state.prewarmedAt || 0) < 60000) return;
+  state.prewarmedAt = Date.now();
+  fetch("/api/scanner/prewarm", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    .catch(() => {});
+}
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {

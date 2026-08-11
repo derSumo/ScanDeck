@@ -13,6 +13,23 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-11
+
+### Hinzugefügt
+
+- Verlauf als eigener Reiter: jeder Scan mit Vorschaubild, Status und Datum, dazu erneut senden, öffnen und löschen. Am Reiter zeigt ein Zähler, wie viele Uploads noch offen sind.
+- Rückmeldung von Paperless-ngx: ScanDeck verfolgt die Verarbeitungsaufgabe und meldet, ob das Dokument angelegt (mit Dokumentnummer), als Duplikat abgelehnt oder mit Fehler abgewiesen wurde. Bisher endete die Spur beim Hochladen.
+- Warteschlange für Uploads: Scheitert die Übertragung, bleibt der Scan gespeichert und wird selbsttätig erneut versucht — nach 30 s, 2 min, 5 min, 15 min, danach stündlich.
+- Aufräumen (opt-in): Lokale Kopien werden nach einer einstellbaren Wartezeit gelöscht, Standard 24 Stunden. Nur bestätigte Uploads werden entfernt; offene, abgelehnte und doppelte Dokumente bleiben liegen.
+- Korrespondent und Dokumenttyp lassen sich beim Scannen wählen (opt-in). Beide Listen kommen aus der Paperless-Instanz, die Auswahl gilt nur für den nächsten Scan.
+- Schnell-Tags (opt-in): die meistgenutzten Tags aus Paperless als antippbare Vorschläge; eigene Tags bleiben frei eintippbar.
+- Scanner vorwärmen (opt-in, standardmäßig an): Beim Öffnen der App wird der Gerätestatus abgefragt, damit ein eingeschlafener Scanner nicht erst beim Druck auf den Knopf aufwacht.
+
+### Geändert
+
+- Uploads laufen grundsätzlich über die Warteschlange, auch der Abschluss eines Stapels. Der Scan gilt damit erst als erledigt, wenn Paperless ihn bestätigt hat.
+- Zusatzfunktionen sind bewusst abgeschaltet ausgeliefert, damit das Dashboard schlank bleibt.
+
 ## [1.4.1] - 2026-08-10
 
 ### Behoben
@@ -100,7 +117,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/derSumo/ScanDeck/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/derSumo/ScanDeck/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/derSumo/ScanDeck/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/derSumo/ScanDeck/compare/v1.2.0...v1.3.0
