@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -41,6 +42,39 @@ for _scheme in ("https://", "http://"):
     )
 
 
+class CapabilityCache:
+    """ScannerCapabilities per device, so a scan costs at most one extra request.
+
+    The answer describes hardware and does not change while the device is
+    plugged in, so a generous lifetime is enough — and a device that cannot be
+    asked simply falls back to sending the settings unchanged.
+    """
+
+    TTL = 30 * 60
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def get(self, base_url: str) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self._entries.get(base_url)
+        if not entry or time.time() - entry[0] > self.TTL:
+            return None
+        return entry[1]
+
+    def put(self, base_url: str, capabilities: dict[str, Any]) -> None:
+        with self._lock:
+            self._entries[base_url] = (time.time(), capabilities)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+capability_cache = CapabilityCache()
+
+
 class ScannerClient:
     def __init__(self, config: dict[str, Any], log: LogHub, timings: TimingStore | None = None) -> None:
         self.config = config
@@ -64,18 +98,31 @@ class ScannerClient:
             timeout=timeout,
         )
 
-    def capabilities(self) -> dict[str, Any]:
-        self.log.publish("Lese ScannerCapabilities …")
+    def capabilities(self, quiet: bool = False) -> dict[str, Any]:
+        if not quiet:
+            self.log.publish("Lese ScannerCapabilities …")
         response = self._get("ScannerCapabilities")
         response.raise_for_status()
         result = parse_capabilities(response.text)
-        extras = " · beidseitig" if result["duplex"] else ""
-        self.log.publish(
-            f"Scanner erreichbar · eSCL {result['version']} · "
-            f"Quellen: {', '.join(result['sources']) or 'unbekannt'}{extras}",
-            "success",
-        )
+        capability_cache.put(self.base_url, result)
+        if not quiet:
+            extras = " · beidseitig" if result["duplex"] else ""
+            self.log.publish(
+                f"Scanner erreichbar · eSCL {result['version']} · "
+                f"Quellen: {', '.join(result['sources']) or 'unbekannt'}{extras}",
+                "success",
+            )
         return result
+
+    def known_capabilities(self) -> dict[str, Any]:
+        """Cached capabilities, fetched on demand. Never raises."""
+        cached = capability_cache.get(self.base_url)
+        if cached is not None:
+            return cached
+        try:
+            return self.capabilities(quiet=True)
+        except (requests.RequestException, ET.ParseError, RuntimeError):
+            return {}  # an unreadable device is sent the settings unchanged
 
     def status(self) -> str:
         response = self._get("ScannerStatus")
@@ -143,12 +190,32 @@ class ScannerClient:
             timeout=30,
         )
         if response.status_code != 201:
-            raise RuntimeError(f"ScanJob abgelehnt (HTTP {response.status_code}).")
+            raise RuntimeError(self._rejection_reason(response.status_code))
         location = response.headers.get("Location")
         if not location:
             raise RuntimeError("ScanJob wurde ohne Location-Header erstellt.")
         self.log.publish("ScanJob angenommen; warte auf das Dokument …", "success")
         return urljoin(f"{self.base_url}/", location)
+
+    def _rejection_reason(self, status_code: int) -> str:
+        """Say what the device meant. "HTTP 409" alone helps nobody."""
+        source = self.config["source"]
+        if status_code == 409:
+            usable = paper_sizes_for((self.known_capabilities().get("limits") or {}).get(source) or {})
+            hint = f" Dieses Gerät kann hier: {', '.join(usable)}." if usable else ""
+            return (
+                "Der Scanner lehnt mindestens eine Einstellung ab (HTTP 409). "
+                f"Meist passen Papierformat oder Auflösung nicht zu {'dem Vorlagenglas' if source == 'Platen' else 'dem Einzug'}."
+                + hint
+            )
+        if status_code == 503:
+            if source == "Feeder":
+                return ("Der Scanner ist nicht bereit (HTTP 503). Liegt Papier im Einzug? "
+                        "Ein leerer Einzug meldet sich genau so.")
+            return "Der Scanner ist gerade belegt (HTTP 503). Bitte kurz warten und erneut versuchen."
+        if status_code == 401:
+            return "Der Scanner verlangt eine Anmeldung (HTTP 401)."
+        return f"ScanJob abgelehnt (HTTP {status_code})."
 
     def _collect_pages(self, job_url: str, ramp: progress_ramp) -> list[Path]:
         """Fetch NextDocument until the scanner says there is no more paper."""
@@ -204,12 +271,62 @@ class ScannerClient:
             return ".jpg"
         return ".pdf" if self.config["output_format"] == "application/pdf" else ".jpg"
 
+    def fit_to_device(self) -> dict[str, Any]:
+        """Bend the requested settings into what this device accepts.
+
+        Asking a flatbed for Legal, or a sheet feeder for 600 dpi it does not
+        have, is answered with a bare "HTTP 409" that tells a user nothing. So
+        the limits are read first and the request is trimmed to fit — and every
+        trim is said out loud, because silently scanning something else than
+        what was asked for would be worse than the error.
+        """
+        source = self.config["source"]
+        size_name = self.config.get("paper_size", "A4")
+        width, height = PAPER_SIZES.get(size_name, PAPER_SIZES["A4"])
+        resolution = int(self.config["resolution"])
+        duplex = bool(self.config.get("duplex")) and source == "Feeder"
+
+        capabilities = self.known_capabilities()
+        if not capabilities:
+            return {"width": width, "height": height, "resolution": resolution, "duplex": duplex}
+
+        limits = (capabilities.get("limits") or {}).get(source) or {}
+        max_width, max_height = limits.get("max_width"), limits.get("max_height")
+        if max_width and width > max_width or max_height and height > max_height:
+            usable = paper_sizes_for(limits)
+            width = min(width, max_width or width)
+            height = min(height, max_height or height)
+            self.log.publish(
+                f"{size_name} passt nicht auf {'das Vorlagenglas' if source == 'Platen' else 'den Einzug'}; "
+                f"es wird auf die größte mögliche Fläche zugeschnitten. "
+                f"Vollständig unterstützt: {', '.join(usable) or 'keines der angebotenen Formate'}.",
+                "warning",
+            )
+
+        max_resolution = limits.get("max_resolution")
+        if max_resolution and resolution > max_resolution:
+            self.log.publish(
+                f"{resolution} dpi kann diese Quelle nicht; es wird mit {max_resolution} dpi gescannt.",
+                "warning",
+            )
+            resolution = max_resolution
+
+        if duplex and not capabilities.get("duplex"):
+            self.log.publish(
+                "Dieser Scanner kann nicht beidseitig einziehen; es wird einseitig gescannt.",
+                "warning",
+            )
+            duplex = False
+
+        return {"width": width, "height": height, "resolution": resolution, "duplex": duplex}
+
     def _build_settings(self) -> str:
         source = self.config["source"]
-        width, height = PAPER_SIZES.get(self.config.get("paper_size", "A4"), PAPER_SIZES["A4"])
+        fitted = self.fit_to_device()
+        width, height, resolution = fitted["width"], fitted["height"], fitted["resolution"]
         duplex = ""
         if source == "Feeder":
-            duplex = f"\n  <scan:Duplex>{'true' if self.config.get('duplex') else 'false'}</scan:Duplex>"
+            duplex = f"\n  <scan:Duplex>{'true' if fitted['duplex'] else 'false'}</scan:Duplex>"
         document_format = self.config["output_format"]
         # This HP firmware rejects the otherwise equivalent, heavily indented
         # form. Keep this proven interoperable eSCL layout compact.
@@ -229,22 +346,53 @@ class ScannerClient:
   <scan:ColorMode>{self.config['color_mode']}</scan:ColorMode>
   <pwg:DocumentFormat>{document_format}</pwg:DocumentFormat>
   <scan:DocumentFormatExt>{document_format}</scan:DocumentFormatExt>
-  <scan:XResolution>{self.config['resolution']}</scan:XResolution>
-  <scan:YResolution>{self.config['resolution']}</scan:YResolution>{duplex}
+  <scan:XResolution>{resolution}</scan:XResolution>
+  <scan:YResolution>{resolution}</scan:YResolution>{duplex}
 </scan:ScanSettings>"""
+
+
+def _int_or_none(value: str | None) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_limits(node: ET.Element | None) -> dict[str, Any]:
+    """The scan area and resolution one input source actually supports."""
+    if node is None:
+        return {}
+    return {
+        "max_width": _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxWidth")),
+        "max_height": _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxHeight")),
+        "max_resolution": _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxOpticalXResolution")),
+    }
 
 
 def parse_capabilities(xml: str) -> dict[str, Any]:
     """What the device says it can do, reduced to what the interface offers."""
     root = ET.fromstring(xml)
+    platen = root.find(f".//{{{SCAN_NS}}}PlatenInputCaps")
+    feeder = root.find(f".//{{{SCAN_NS}}}AdfSimplexInputCaps")
     sources = []
-    if root.find(f".//{{{SCAN_NS}}}PlatenInputCaps") is not None:
+    if platen is not None:
         sources.append("Platen")
-    if root.find(f".//{{{SCAN_NS}}}AdfSimplexInputCaps") is not None:
+    if feeder is not None:
         sources.append("Feeder")
     return {
         "version": root.findtext(f".//{{{PWG_NS}}}Version", default="unbekannt"),
         "model": root.findtext(f".//{{{PWG_NS}}}MakeAndModel", default="eSCL-Scanner"),
         "sources": sources,
         "duplex": root.find(f".//{{{SCAN_NS}}}AdfDuplexInputCaps") is not None,
+        "limits": {"Platen": _source_limits(platen), "Feeder": _source_limits(feeder)},
     }
+
+
+def paper_sizes_for(limits: dict[str, Any]) -> list[str]:
+    """Which of the offered paper sizes this source can actually cover."""
+    if not limits or not limits.get("max_height"):
+        return list(PAPER_SIZES)
+    return [
+        name for name, (width, height) in PAPER_SIZES.items()
+        if width <= (limits.get("max_width") or width) and height <= limits["max_height"]
+    ]

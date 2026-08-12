@@ -44,6 +44,7 @@ const state = {
   progressTitle: "Scan läuft",
   queue: 0,
   auth: { enabled: false, authenticated: true },
+  capabilities: { known: false },
   eta: null,
   etaAt: 0,
   scanStart: 0,
@@ -106,7 +107,44 @@ function getSegment(target, fallback) {
 // Beidseitig gibt es nur im Einzug; auf dem Flachbett waere die Option Unsinn.
 function syncDuplexRow() {
   const row = $("#duplex-row");
-  if (row) row.hidden = getSegment("source", state.config.source) !== "Feeder";
+  if (!row) return;
+  const feeder = getSegment("source", state.config.source) === "Feeder";
+  const canDuplex = !state.capabilities.known || state.capabilities.duplex;
+  row.hidden = !feeder || !canDuplex;
+  if (!row.hidden) return;
+  // Ein Geraet ohne beidseitigen Einzug soll den Schalter nicht nur verstecken,
+  // sondern die Einstellung auch nicht heimlich gesetzt lassen.
+  if (feeder && !canDuplex) setValue("duplex", false);
+}
+
+// Was das Geraet nicht kann, wird gar nicht erst angeboten: ein Legal-Scan auf
+// einem A4-Vorlagenglas endete sonst in einem nackten "HTTP 409".
+function syncDeviceLimits() {
+  const caps = state.capabilities;
+  const source = getSegment("source", state.config.source) || "Platen";
+  const sizes = caps.known && caps.paper_sizes ? caps.paper_sizes[source] : null;
+  const maxDpi = caps.known && caps.max_resolution ? caps.max_resolution[source] : null;
+
+  $$('.seg[data-target="paper-size"] button').forEach((button) => {
+    const ok = !sizes || sizes.includes(button.dataset.value);
+    button.disabled = !ok;
+    button.title = ok ? "" : `${button.dataset.value} passt nicht auf diese Quelle`;
+    if (!ok && button.classList.contains("active")) setSegment("paper-size", sizes[0] || "A4");
+  });
+
+  $$('.seg[data-target="resolution"] button').forEach((button) => {
+    const ok = !maxDpi || Number(button.dataset.value) <= maxDpi;
+    button.disabled = !ok;
+    button.title = ok ? "" : `Diese Quelle scannt höchstens ${maxDpi} dpi`;
+    if (!ok && button.classList.contains("active")) setSegment("resolution", maxDpi);
+  });
+  syncDuplexRow();
+}
+
+async function loadCapabilities() {
+  const caps = await api("/api/scanner/capabilities").catch(() => ({ known: false }));
+  state.capabilities = caps;
+  syncDeviceLimits();
 }
 
 function renderChips(container, tags, onRemove) {
@@ -316,7 +354,7 @@ function applyConfig(config) {
   setSegment("resolution", config.resolution);
   setSegment("color-mode", config.color_mode);
   setValue("duplex", config.duplex);
-  syncDuplexRow();
+  syncDeviceLimits();
 
   renderTags();
   renderQuickRow();
@@ -1359,7 +1397,7 @@ $$(".seg").forEach((group) =>
       state.config[group.dataset.target.replace("-", "_")] =
         group.dataset.target === "resolution" ? Number(button.dataset.value) : button.dataset.value;
       renderQuickRow();
-      syncDuplexRow();
+      syncDeviceLimits();
     }
   })
 );
@@ -1407,6 +1445,9 @@ $("#test-scanner").addEventListener("click", async () => {
   try {
     await saveSettings(false);
     const result = await api("/api/test/scanner", { method: "POST", body: "{}" });
+    // Der Test liefert die Geraetegrenzen gleich mit, also direkt anwenden.
+    state.capabilities = { ...result, known: true };
+    syncDeviceLimits();
     toast(`${result.model} · eSCL ${result.version}`, "success");
   } catch (error) {
     toast(error.message, "error");
@@ -1700,6 +1741,7 @@ async function boot() {
   await refreshState().catch(() => {});
   checkForUpdate().catch(() => {});
   loadCollections().catch(() => {});
+  loadCapabilities().catch(() => {});
   prewarmScanner();
 
   if (!started) {

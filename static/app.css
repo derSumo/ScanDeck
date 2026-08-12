@@ -605,6 +605,9 @@ input[readonly] { color: var(--text-dim); }
 }
 .seg button:active { transform: scale(0.96); }
 .seg button.active { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(255, 176, 60, 0.3); }
+/* Was das Geraet nicht kann, bleibt sichtbar, aber unwaehlbar. */
+.seg button:disabled { opacity: 0.32; cursor: not-allowed; text-decoration: line-through; }
+.seg button:disabled:active { transform: none; }
 
 /* Chips ------------------------------------------------------------------- */
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }

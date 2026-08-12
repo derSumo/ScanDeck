@@ -49,7 +49,7 @@ from scandeck.documents import (
     preview_cache,
     render_preview,
 )
-from scandeck.escl import ScannerClient
+from scandeck.escl import ScannerClient, paper_sizes_for
 from scandeck.events import LogHub, TooManySubscribers
 from scandeck.jobs import JobStore, TimingStore
 from scandeck.network import (
@@ -635,14 +635,42 @@ def state() -> Response:
 # Routes: devices
 # --------------------------------------------------------------------------- #
 
+def capability_summary(capabilities: dict[str, Any]) -> dict[str, Any]:
+    """What the interface needs in order to only offer what the device can do."""
+    limits = capabilities.get("limits") or {}
+    return {
+        **capabilities,
+        "paper_sizes": {source: paper_sizes_for(limits.get(source) or {})
+                        for source in ("Platen", "Feeder")},
+        "max_resolution": {source: (limits.get(source) or {}).get("max_resolution")
+                           for source in ("Platen", "Feeder")},
+    }
+
+
 @app.post("/api/test/scanner")
 def test_scanner() -> Response:
     try:
         result = ScannerClient(store.get(), logs, timings).capabilities()
-        return jsonify({"ok": True, **result})
+        return jsonify({"ok": True, **capability_summary(result)})
     except (requests.RequestException, ET.ParseError, RuntimeError) as error:
         logs.publish(f"Scanner-Test fehlgeschlagen: {error}", "error")
         return jsonify({"ok": False, "error": str(error)}), 502
+
+
+@app.get("/api/scanner/capabilities")
+def scanner_capabilities() -> Response:
+    """What this device supports, so unsupported options can be greyed out.
+
+    Answers from the cache when it can and never fails loudly: not knowing is a
+    perfectly good reason to keep offering everything.
+    """
+    config = store.get()
+    if not config.get("scanner_url"):
+        return jsonify({"ok": False, "known": False})
+    capabilities = ScannerClient(config, logs, timings).known_capabilities()
+    if not capabilities:
+        return jsonify({"ok": False, "known": False})
+    return jsonify({"ok": True, "known": True, **capability_summary(capabilities)})
 
 
 @app.post("/api/test/paperless")

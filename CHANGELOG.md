@@ -13,6 +13,16 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-08-12
+
+### Behoben
+
+- **Scanaufträge wurden mit „HTTP 409“ abgelehnt.** Die in 1.6.0 neu angebotenen Papierformate und der Duplex-Schalter wurden ungeprüft an den Scanner geschickt — auch dann, wenn das Gerät sie gar nicht kann. Ein Legal-Scan auf einem Vorlagenglas, das nur A4 hoch ist (etwa HP DeskJet 4100), scheiterte damit zuverlässig.
+- ScanDeck liest jetzt die Grenzen des Geräts (maximale Fläche und Auflösung je Quelle, beidseitiger Einzug) und passt den Auftrag daran an: Ein zu großes Format wird auf die größte mögliche Fläche zugeschnitten, eine zu hohe Auflösung heruntergesetzt, beidseitig auf einem Gerät ohne Duplex-Einzug auf einseitig. Jede Anpassung steht im Protokoll — es wird nichts stillschweigend anders gescannt, als du es eingestellt hast.
+- In den Einstellungen sind Formate und Auflösungen, die das Gerät nicht beherrscht, durchgestrichen und nicht mehr wählbar; der Duplex-Schalter erscheint nur bei einem Scanner mit beidseitigem Einzug. Die Grenzen kommen aus `ScannerCapabilities` und werden zwischengespeichert.
+- Abgelehnte Aufträge erklären sich: statt „ScanJob abgelehnt (HTTP 409)“ nennt die Meldung die wahrscheinliche Ursache und die Formate, die diese Quelle tatsächlich kann. Ein leerer Einzug (HTTP 503) sagt das ebenfalls.
+- Der Dienst startet auch dann, wenn eine gespeicherte Einstellung nicht mehr gültig ist. Bisher konnte das Anlegen des Sitzungsschlüssels den Start abbrechen.
+
 ## [1.6.0] - 2026-08-12
 
 ### Hinzugefügt
@@ -46,7 +56,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
 - Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
 - Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
-- Testsuite (131 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+- Testsuite (142 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
 
 ## [1.5.0] - 2026-08-11
 
@@ -152,7 +162,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/derSumo/ScanDeck/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/derSumo/ScanDeck/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/derSumo/ScanDeck/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/derSumo/ScanDeck/compare/v1.4.0...v1.4.1

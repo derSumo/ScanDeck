@@ -234,3 +234,149 @@ def test_capabilities_without_a_feeder(deck):
     result = parse_capabilities(stripped)
     assert result["sources"] == ["Platen"]
     assert result["duplex"] is False
+
+
+# --- fitting the request to the device ------------------------------------- #
+
+# Values taken from a real HP DeskJet 4100: the flatbed stops at A4 height,
+# the feeder reaches Legal but only scans up to 300 dpi, and it cannot duplex.
+DESKJET = CAPABILITIES.replace(
+    "<scan:PlatenInputCaps><scan:MinWidth>1</scan:MinWidth></scan:PlatenInputCaps>",
+    "<scan:PlatenInputCaps><scan:MaxWidth>2550</scan:MaxWidth>"
+    "<scan:MaxHeight>3508</scan:MaxHeight>"
+    "<scan:MaxOpticalXResolution>1200</scan:MaxOpticalXResolution></scan:PlatenInputCaps>",
+).replace(
+    "<scan:AdfSimplexInputCaps><scan:MinWidth>1</scan:MinWidth></scan:AdfSimplexInputCaps>",
+    "<scan:AdfSimplexInputCaps><scan:MaxWidth>2550</scan:MaxWidth>"
+    "<scan:MaxHeight>4200</scan:MaxHeight>"
+    "<scan:MaxOpticalXResolution>300</scan:MaxOpticalXResolution></scan:AdfSimplexInputCaps>",
+).replace(
+    "<scan:AdfDuplexInputCaps><scan:MinWidth>1</scan:MinWidth></scan:AdfDuplexInputCaps>", "",
+)
+
+
+class DeskJet(FakeScanner):
+    """Answers ScannerCapabilities like the real device does."""
+
+    def __init__(self, sheets=1):
+        super().__init__(sheets=sheets)
+        self.capability_calls = 0
+
+    def get(self, url, **kwargs):
+        if url.endswith("ScannerCapabilities"):
+            self.capability_calls += 1
+            return FakeResponse(text=DESKJET)
+        return super().get(url, **kwargs)
+
+
+@pytest.fixture()
+def deskjet(deck, monkeypatch):
+    from scandeck import escl
+
+    escl.capability_cache.clear()
+
+    def build(**overrides):
+        device = DeskJet(sheets=1)
+        monkeypatch.setattr(escl, "scanner_session", device)
+        config = deck.validate_config({
+            **deck.store.get(), "scanner_url": "https://10.0.0.31:443", **overrides,
+        })
+        return device, escl.ScannerClient(config, deck.logs, deck.timings)
+
+    return build
+
+
+def test_limits_are_read_per_source(deck):
+    from scandeck.escl import parse_capabilities
+
+    limits = parse_capabilities(DESKJET)["limits"]
+    assert limits["Platen"]["max_height"] == 3508
+    assert limits["Feeder"]["max_height"] == 4200
+    assert limits["Feeder"]["max_resolution"] == 300
+
+
+def test_legal_is_not_offered_for_a_flatbed_that_stops_at_a4(deck):
+    from scandeck.escl import paper_sizes_for, parse_capabilities
+
+    limits = parse_capabilities(DESKJET)["limits"]
+    assert "Legal" not in paper_sizes_for(limits["Platen"])
+    assert set(paper_sizes_for(limits["Platen"])) == {"A4", "Letter", "A5"}
+    # The feeder is taller, so there Legal is fine.
+    assert "Legal" in paper_sizes_for(limits["Feeder"])
+
+
+def test_legal_on_the_flatbed_is_trimmed_instead_of_refused(deskjet):
+    """This is the HTTP 409 the device answered with before."""
+    device, client = deskjet(source="Platen", paper_size="Legal")
+    client.scan()
+    root = settings_of(device)
+    assert find(root, "Height") == "3508"  # clamped to what the glass can do
+    assert find(root, "Width") == "2550"
+
+
+def test_a_size_that_fits_is_sent_unchanged(deskjet):
+    device, client = deskjet(source="Platen", paper_size="Letter")
+    client.scan()
+    assert (find(settings_of(device), "Width"), find(settings_of(device), "Height")) == ("2550", "3300")
+
+
+def test_the_feeder_resolution_is_capped(deskjet):
+    device, client = deskjet(source="Feeder", resolution=600)
+    client.scan()
+    assert find(settings_of(device), "XResolution") == "300"
+
+
+def test_the_flatbed_keeps_its_high_resolution(deskjet):
+    device, client = deskjet(source="Platen", resolution=600)
+    client.scan()
+    assert find(settings_of(device), "XResolution") == "600"
+
+
+def test_duplex_is_dropped_on_a_device_that_cannot_do_it(deskjet):
+    device, client = deskjet(source="Feeder", duplex=True)
+    client.scan()
+    assert find(settings_of(device), "Duplex") == "false"
+
+
+def test_an_unreadable_device_gets_the_settings_unchanged(deck, monkeypatch):
+    """Not knowing the limits must never stand in the way of a scan."""
+    from scandeck import escl
+
+    escl.capability_cache.clear()
+
+    class NoCapabilities(FakeScanner):
+        def get(self, url, **kwargs):
+            if url.endswith("ScannerCapabilities"):
+                return FakeResponse(status_code=500)
+            return super().get(url, **kwargs)
+
+    device = NoCapabilities(sheets=1)
+    monkeypatch.setattr(escl, "scanner_session", device)
+    config = deck.validate_config({**deck.store.get(), "scanner_url": "https://x:443",
+                                   "source": "Platen", "paper_size": "Legal"})
+    escl.ScannerClient(config, deck.logs, deck.timings).scan()
+    assert find(settings_of(device), "Height") == "4200"
+
+
+def test_capabilities_are_fetched_once_and_then_cached(deskjet):
+    """A scan must not pay for the same answer over and over."""
+    device, client = deskjet(source="Platen")
+    device.sheets = 3
+    client.scan()
+    assert device.capability_calls == 1
+
+    client.known_capabilities()
+    client.fit_to_device()
+    assert device.capability_calls == 1  # still the cached answer
+
+
+def test_a_rejected_job_says_what_is_wrong(deskjet):
+    device, client = deskjet(source="Platen")
+    message = client._rejection_reason(409)
+    assert "409" in message and "Papierformat" in message
+    assert "A4" in message and "Legal" not in message  # names only what fits
+
+
+def test_an_empty_feeder_is_named_as_such(deskjet):
+    device, client = deskjet(source="Feeder")
+    assert "Papier im Einzug" in client._rejection_reason(503)
