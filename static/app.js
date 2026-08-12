@@ -42,6 +42,8 @@ const state = {
   batch: { active: false, pages: [], replace_index: null },
   collections: { loaded: false },
   progressTitle: "Scan läuft",
+  queue: 0,
+  auth: { enabled: false, authenticated: true },
   eta: null,
   etaAt: 0,
   scanStart: 0,
@@ -65,7 +67,15 @@ async function api(url, options = {}) {
     ...options,
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    // Die Sitzung kann jederzeit ablaufen; dann zurueck zur Anmeldung, statt
+    // den Nutzer mit einem Fehler pro Hintergrundabfrage zu bewerfen.
+    if (response.status === 401 && body.auth_required) {
+      showLogin();
+      throw Object.assign(new Error("Anmeldung erforderlich."), { authRequired: true });
+    }
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
   return body;
 }
 
@@ -91,6 +101,12 @@ function setSegment(target, value) {
 function getSegment(target, fallback) {
   const active = $(`.seg[data-target="${target}"] button.active`);
   return active ? active.dataset.value : fallback;
+}
+
+// Beidseitig gibt es nur im Einzug; auf dem Flachbett waere die Option Unsinn.
+function syncDuplexRow() {
+  const row = $("#duplex-row");
+  if (row) row.hidden = getSegment("source", state.config.source) !== "Feeder";
 }
 
 function renderChips(container, tags, onRemove) {
@@ -296,8 +312,11 @@ function applyConfig(config) {
 
   setSegment("output-format", config.output_format);
   setSegment("source", config.source);
+  setSegment("paper-size", config.paper_size || "A4");
   setSegment("resolution", config.resolution);
   setSegment("color-mode", config.color_mode);
+  setValue("duplex", config.duplex);
+  syncDuplexRow();
 
   renderTags();
   renderQuickRow();
@@ -319,6 +338,8 @@ function collectConfig() {
     default_tags: state.defaultTags,
     create_missing_tags: getValue("create-missing-tags"),
     source: getSegment("source", state.config.source),
+    paper_size: getSegment("paper-size", state.config.paper_size || "A4"),
+    duplex: getValue("duplex"),
     resolution: Number(getSegment("resolution", state.config.resolution)),
     color_mode: getSegment("color-mode", state.config.color_mode),
     output_format: getSegment("output-format", state.config.output_format),
@@ -1075,7 +1096,10 @@ function handleProgress(event) {
         // Inside a batch the thumbnail strip is the feedback; a full-screen
         // preview after every page would only be in the way.
         loadBatch().catch(() => {});
-        toast(`Seite ${(event.page_index ?? 0) + 1} erfasst · ${event.pages} im Stapel`, "success");
+        // Ein Einzug liefert mehrere Blatt auf einmal; die Meldung muss das sagen.
+        const added = event.added ?? 1;
+        const what = added > 1 ? `${added} Seiten erfasst` : `Seite ${(event.page_index ?? 0) + 1} erfasst`;
+        toast(`${what} · ${event.pages} im Stapel`, "success");
       } else {
         showPreview(event.file);
         loadBatch().catch(() => {});
@@ -1331,10 +1355,11 @@ $$(".seg").forEach((group) =>
     const button = event.target.closest("button");
     if (!button) return;
     group.querySelectorAll("button").forEach((item) => item.classList.toggle("active", item === button));
-    if (["output-format", "source", "resolution", "color-mode"].includes(group.dataset.target)) {
+    if (["output-format", "source", "paper-size", "resolution", "color-mode"].includes(group.dataset.target)) {
       state.config[group.dataset.target.replace("-", "_")] =
         group.dataset.target === "resolution" ? Number(button.dataset.value) : button.dataset.value;
       renderQuickRow();
+      syncDuplexRow();
     }
   })
 );
@@ -1558,30 +1583,165 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closePreview();
 });
 
+/* --- Zugriffsschutz ------------------------------------------------------- */
+
+function showLogin(message = "") {
+  const overlay = $("#login-overlay");
+  if (!overlay.hidden && !message) return;
+  overlay.hidden = false;
+  document.body.classList.add("is-locked");
+  const error = $("#login-error");
+  error.hidden = !message;
+  error.textContent = message;
+  $("#login-password").focus();
+}
+
+function hideLogin() {
+  $("#login-overlay").hidden = true;
+  document.body.classList.remove("is-locked");
+  $("#login-password").value = "";
+  $("#login-error").hidden = true;
+}
+
+function renderAuthCard(authState) {
+  state.auth = authState;
+  $("#auth-on").hidden = !authState.enabled;
+  $("#auth-off").hidden = Boolean(authState.enabled);
+}
+
+async function refreshAuth() {
+  const authState = await api("/api/auth/state");
+  renderAuthCard(authState);
+  return authState;
+}
+
+$("#login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#login-submit");
+  button.disabled = true;
+  try {
+    await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ password: $("#login-password").value }),
+    });
+    hideLogin();
+    await boot();
+  } catch (error) {
+    // Der 401 der Anmeldung ist die Antwort selbst, nicht der Rauswurf.
+    $("#login-error").hidden = false;
+    $("#login-error").textContent = error.message;
+    $("#login-password").select();
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#auth-enable").addEventListener("click", async () => {
+  const password = getValue("auth-password");
+  if (password !== getValue("auth-password-repeat")) {
+    toast("Die Passwörter stimmen nicht überein", "error");
+    return;
+  }
+  try {
+    renderAuthCard(await api("/api/auth/enable", { method: "POST", body: JSON.stringify({ password }) }));
+    setValue("auth-password", "");
+    setValue("auth-password-repeat", "");
+    toast("Zugriffsschutz eingeschaltet", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
+$("#auth-change").addEventListener("click", async () => {
+  try {
+    renderAuthCard(await api("/api/auth/password", {
+      method: "POST",
+      body: JSON.stringify({ current: getValue("auth-current"), password: getValue("auth-new") }),
+    }));
+    setValue("auth-current", "");
+    setValue("auth-new", "");
+    toast("Passwort geändert — andere Geräte müssen sich neu anmelden", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
+$("#auth-disable").addEventListener("click", async () => {
+  if (!confirm("Zugriffsschutz ausschalten? Danach kommt jeder im Netz ohne Passwort an die Oberfläche.")) return;
+  try {
+    renderAuthCard(await api("/api/auth/disable", { method: "POST" }));
+    toast("Zugriffsschutz ausgeschaltet", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
+$("#auth-logout").addEventListener("click", async () => {
+  await api("/api/auth/logout", { method: "POST" }).catch(() => {});
+  showLogin();
+});
+
 /* --- boot ---------------------------------------------------------------- */
 
 const params = new URLSearchParams(window.location.search);
 if (params.get("view") === "settings") activateView("settings");
 
-loadConfig()
-  .then(async (config) => {
-    await refreshState().catch(() => {});
-    checkForUpdate().catch(() => {});
-    loadCollections().catch(() => {});
-    prewarmScanner();
-    if (params.get("action") === "scan" && config.setup_complete) startScan();
-  })
-  .catch((error) => toast(error.message, "error"));
+let started = false;
 
-// A long-lived PWA tab should still notice a release eventually.
-setInterval(() => checkForUpdate().catch(() => {}), 6 * 3600 * 1000);
+async function boot() {
+  const authState = await refreshAuth();
+  if (!authState.authenticated) {
+    showLogin();
+    return;
+  }
+  hideLogin();
 
-connectEvents();
-setInterval(() => refreshState().catch(() => {}), 4000);
+  const config = await loadConfig();
+  await refreshState().catch(() => {});
+  checkForUpdate().catch(() => {});
+  loadCollections().catch(() => {});
+  prewarmScanner();
+
+  if (!started) {
+    started = true;
+    // Erst nach der Anmeldung verbinden: ein Ereignisstrom gegen eine
+    // geschlossene Tuer wuerde nur endlos neu verbinden.
+    connectEvents();
+    pollState();
+    // A long-lived PWA tab should still notice a release eventually.
+    setInterval(() => checkForUpdate().catch(() => {}), 6 * 3600 * 1000);
+  }
+  if (params.get("action") === "scan" && config.setup_complete) startScan();
+}
+
+boot().catch((error) => {
+  if (!error.authRequired) toast(error.message, "error");
+});
+
+// The event stream carries the live picture; this poll only catches what it
+// misses (a resumed PWA, a batch driven from another device). So it runs fast
+// while something is happening and backs off when nothing is — a phone in a
+// pocket should not wake its radio every four seconds, and every open tab
+// holds one of the handful of worker threads the container has.
+function pollDelay() {
+  if (document.hidden) return 60000;
+  if (state.running) return 2000;
+  return state.queue ? 8000 : 15000;
+}
+
+function pollState() {
+  const tick = () => {
+    const again = () => setTimeout(tick, pollDelay());
+    // Nicht gegen die Anmeldemaske pollen: das brächte nur 401 im Takt.
+    if (document.hidden || !$("#login-overlay").hidden) return again();
+    refreshState().catch(() => {}).finally(again);
+  };
+  setTimeout(tick, pollDelay());
+}
 
 // Keep the UI honest after the phone wakes the PWA back up.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return;
+  if (document.hidden || !$("#login-overlay").hidden) return;
   refreshState().catch(() => {});
   prewarmScanner();
 });

@@ -13,6 +13,41 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-12
+
+### Hinzugefügt
+
+- **Der Einzug liefert endlich alle Blätter.** ScanDeck holte pro Scanauftrag genau ein Dokument ab und verwarf damit stillschweigend jedes weitere Blatt. Jetzt wird geholt, bis der Einzug leer meldet — fünf eingelegte Blatt ergeben fünf Seiten.
+- **Einzug und Stapel arbeiten seitenweise zusammen.** Ein Einzugsdurchlauf legt eine Kachel je Blatt in den Stapel, nicht eine für den ganzen Stoß. Das gilt auch, wenn der Scanner den Durchlauf als ein einziges mehrseitiges PDF zurückgibt: Es wird in Einzelseiten zerlegt. Damit lässt sich jede Seite einzeln verschieben, drehen, neu scannen oder verwerfen.
+- Ist beim Stapel eine Seite zum Neu-Scannen markiert und der Einzug bringt mehrere Blatt, ersetzt das erste die markierte Seite; der Rest wird direkt dahinter eingefügt, ohne die folgenden Seiten zu verwürfeln.
+- Ohne Stapel-Modus wird ein Einzugsdurchlauf zu einem Dokument zusammengefasst und als Ganzes hochgeladen, statt als lauter Einzeldateien im Verlauf zu landen.
+- **Papierformat** wählbar: A4, Letter, Legal und A5. Bisher war A4 fest verdrahtet, sodass Legal beschnitten wurde.
+- **Beidseitiger Einzug** (Duplex) als Schalter; er erscheint nur bei der Quelle Einzug. Der Scannertest meldet außerdem, ob das Gerät beidseitig kann.
+- Die Scanner-Suche prüft neben `https://…:443` auch `http://…:80` und `http://…:8080`. Geräte von Brother, Canon und Epson antworten dort und blieben bisher unsichtbar.
+- **Zugriffsschutz** als Opt-in: Unter *Einstellungen → Zugriffsschutz* lässt sich ein Passwort vergeben, das danach für die gesamte Oberfläche und jeden API-Endpunkt gilt. Offen bleiben nur `/health` (die Selbstprüfung des Containers), die Startseite samt Skript für die Anmeldemaske sowie die Home-Assistant-Endpunkte, die sich ohnehin mit ihrem API-Key ausweisen — bestehende Automatisierungen laufen also unverändert weiter. Das Passwort liegt nur als Hash in `config.json`, das einschaltende Gerät bleibt angemeldet, ein Passwortwechsel meldet alle anderen ab, und zehn Fehlversuche sperren die Anmeldung fünf Minuten lang. Ohne Passwort verhält sich ScanDeck wie bisher.
+
+### Behoben
+
+- Der Scanauftrag wird nach dem Scan wieder freigegeben. Ohne das lehnten manche Geräte den nächsten Scan als „beschäftigt“ ab.
+- Ein Dokument, dessen Seitenzahl sich nicht lesen lässt, gilt als einseitig, statt den ganzen Scan scheitern zu lassen. Der Scan war ja erfolgreich — er darf nicht an einer kaputten Seitenzählung verloren gehen.
+- Ein leerer Einzug meldet jetzt „Liegt Papier im Einzug?“ statt eines technischen Fehlers.
+- Ein Upload konnte doppelt starten und landete dann als Duplikat in Paperless: Die Warteschlange griff sich einen Auftrag, an dem bereits gearbeitet wurde. Ein Auftrag wird jetzt verbindlich übernommen, bevor die Übertragung beginnt.
+- Der Verlauf wuchs im Arbeitsspeicher unbegrenzt weiter, obwohl die Datei nur die letzten 500 Einträge behielt. Beides ist jetzt gleich groß — offene Uploads werden dabei nie verworfen, egal wie alt sie sind.
+- Ließ sich eine Datei nicht löschen (fremder Besitzer, schreibgeschütztes Volume), verschwand der Verlaufseintrag trotzdem und der Scan blieb unerreichbar liegen. Jetzt wird zuerst die Datei entfernt und der Eintrag nur, wenn das gelungen ist.
+- Zwei gleichzeitig geöffnete Vorschauen konnten sich gegenseitig das Bild wegnehmen und die falsche Seite zeigen.
+- Eine unpassende Seitenreihenfolge (`/api/batch/order`) mit gemischten Werten beantwortete der Dienst mit einem internen Fehler statt mit einer verständlichen Meldung.
+
+### Geändert
+
+- Der Upload nach Paperless-ngx läuft neben dem Scan statt davor: Ein langsames oder nicht erreichbares Paperless blockiert den Scanner nicht mehr bis zu 90 Sekunden. Der Auftrag wird vorher gespeichert, ein Neustart mittendrin verliert also nichts.
+- Die Oberfläche fragt den Zustand seltener ab, wenn nichts passiert, und gar nicht, solange sie im Hintergrund liegt. Das schont den Akku am Telefon und die wenigen Arbeitsfäden des Dienstes; das Live-Protokoll liefert die Fortschritte weiterhin sofort.
+- Ein neu gewähltes Ausgabeverzeichnis wird beim Speichern angelegt und geprüft, statt erst beim nächsten Scan aufzufallen.
+- Die Suche nach dem Update blockiert nicht mehr alle weiteren Anfragen, solange GitHub antwortet.
+- Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
+- Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
+- Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
+- Testsuite (131 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+
 ## [1.5.0] - 2026-08-11
 
 ### Hinzugefügt
@@ -117,7 +152,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/derSumo/ScanDeck/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/derSumo/ScanDeck/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/derSumo/ScanDeck/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/derSumo/ScanDeck/compare/v1.3.0...v1.4.0

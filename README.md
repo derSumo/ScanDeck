@@ -100,7 +100,19 @@ Während ein Stapel gesammelt wird, zeigt die Fortschrittsanzeige nur drei Schri
 
 Während eines Stapels erscheint bewusst keine Vollbild-Vorschau nach jeder Seite; das Vorschaubild in der Liste reicht und hält den Ablauf schnell. Erst das fertige Dokument wird wieder groß angezeigt. Der Stapel überlebt einen Seiten-Reload und ist auf allen Geräten gleich — du kannst also am Handy scannen und am Rechner sortieren.
 
-Das Format des Stapels ist immer PDF, unabhängig von der Formateinstellung. Einzelne Seiten dürfen gemischt sein (PDF vom Scanner oder JPEG), sie werden beim Zusammenführen vereinheitlicht. Auch der automatische Einzug (ADF) funktioniert im Stapel: Er liefert pro Scan mehrere Seiten, die alle angehängt werden.
+Das Format des Stapels ist immer PDF, unabhängig von der Formateinstellung. Einzelne Seiten dürfen gemischt sein (PDF vom Scanner oder JPEG), sie werden beim Zusammenführen vereinheitlicht.
+
+### Einzug und Stapel zusammen
+
+Der automatische Einzug (ADF) und der Stapel-Modus gehen zusammen, und zwar seitenweise: Legst du fünf Blatt ein, holt ScanDeck alle fünf und legt **fünf einzelne Kacheln** in den Stapel. Jede davon lässt sich für sich verschieben, drehen, neu scannen oder wegwerfen — genau wie eine einzeln vom Glas gescannte Seite.
+
+Das gilt auch, wenn der Scanner den ganzen Einzug als *ein* mehrseitiges PDF zurückgibt (viele Geräte tun das): ScanDeck zerlegt es in Einzelseiten, bevor sie im Stapel landen. Beim Abschließen werden sie in der von dir gewählten Reihenfolge wieder zu einem Dokument zusammengesetzt.
+
+Ist **Neu scannen** auf einer Seite markiert und der Einzug liefert mehrere Blatt, ersetzt das erste Blatt die markierte Seite und der Rest wird direkt dahinter eingefügt — die Seiten danach behalten ihre Reihenfolge.
+
+**Ohne** Stapel-Modus wird ein Einzugsdurchlauf zu einem einzigen Dokument zusammengefasst und als Ganzes hochgeladen, nicht zu fünf einzelnen Dateien.
+
+Unter *Einstellungen → Ausgabe* stehen dazu **Papierformat** (A4, Letter, Legal, A5) und **Beidseitig einziehen** — letzteres erscheint nur, wenn als Quelle der Einzug gewählt ist.
 
 ### Verlauf und Warteschlange
 
@@ -215,17 +227,62 @@ ScanDeck folgt [Semantic Versioning](https://semver.org/lang/de/). Die maßgebli
 
 Die App sieht einmal beim Start und danach alle sechs Stunden bei GitHub nach, ob es ein neueres Release gibt. Falls ja, färbt sich die Versionsanzeige neben dem Logo amber und bekommt einen kleinen Pfeil — ein Tipp darauf öffnet die Release-Seite. Unter *Einstellungen → Version* lässt sich sofort prüfen oder die Abfrage ganz abschalten; sie geht ausschließlich an `api.github.com` und sendet nichts über deine Installation.
 
-Für eine neue Version: `VERSION` anheben, den Changelog ergänzen, committen und taggen. Der Workflow [`docker-publish.yml`](.github/workflows/docker-publish.yml) baut daraufhin das Image für amd64 und arm64 und veröffentlicht es unter der neuen Versionsnummer — er bricht ab, wenn Tag und `VERSION` nicht zusammenpassen.
+Für eine neue Version: `VERSION` anheben, den Changelog ergänzen, committen und taggen. Der Workflow [`docker-publish.yml`](.github/workflows/docker-publish.yml) führt die Tests aus, baut daraufhin das Image für amd64 und arm64 und veröffentlicht es unter der neuen Versionsnummer — er bricht ab, wenn die Tests fehlschlagen oder Tag und `VERSION` nicht zusammenpassen.
 
 ```powershell
 git tag -a v1.0.1 -m "ScanDeck 1.0.1"
 git push origin main --tags
 ```
 
+## Mitentwickeln
+
+Der Code liegt in zwei Ebenen: [`app.py`](app.py) hält die HTTP-Oberfläche, den Laufzeitzustand und die Hintergrundschleife; alles, was für sich allein Sinn ergibt, steht im Paket [`scandeck/`](scandeck/).
+
+| Modul | Zuständig für |
+| --- | --- |
+| [`config.py`](scandeck/config.py) | Was gespeichert werden darf, Prüfung, `config.json` |
+| [`escl.py`](scandeck/escl.py) | Gespräch mit dem Scanner: Fähigkeiten, Status, Scanauftrag |
+| [`network.py`](scandeck/network.py) | Welche Netze und Ports nach einem Scanner abgesucht werden |
+| [`documents.py`](scandeck/documents.py) | Vorschau, Seiten trennen, Seiten zusammenführen |
+| [`batch.py`](scandeck/batch.py) | Der gesammelte Stapel und seine Reihenfolge |
+| [`jobs.py`](scandeck/jobs.py) | Upload-Warteschlange und gemessene Scandauern |
+| [`paperless.py`](scandeck/paperless.py) | Upload und Rückmeldung von Paperless-ngx |
+| [`events.py`](scandeck/events.py) | Live-Protokoll und Fortschritt für alle Oberflächen |
+| [`updates.py`](scandeck/updates.py) | Versionsabgleich mit GitHub |
+
+Tests laufen ohne Gerät und ohne Netz — der Scanner wird nachgebildet:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
 ## Lizenz
 
 [MIT](LICENSE)
 
+## Zugriffsschutz
+
+Standardmäßig ist die Oberfläche offen — ScanDeck ist für das eigene Netz gedacht, und ein Passwort vor dem Scan-Knopf stört dort öfter, als es nützt.
+
+Unter *Einstellungen → Zugriffsschutz* lässt sich ein Passwort vergeben (mindestens 8 Zeichen). Danach verlangt **die gesamte Oberfläche und jeder API-Endpunkt** eine Anmeldung. Sinnvoll, wenn Gäste im WLAN sind, mehrere Haushalte am selben Netz hängen oder ScanDeck hinter einem Reverse Proxy steht.
+
+Was dabei bewusst offen bleibt:
+
+- `/health` — der Container prüft sich damit selbst; mit Passwort würde er sich als ungesund melden.
+- Die Startseite samt Stylesheet und Skript, sonst ließe sich die Anmeldemaske nicht anzeigen.
+- Die Endpunkte `/api/ha/scan`, `/api/ha/state`, `/api/ha/batch` und `/api/ha/test` — sie weisen sich mit dem **Home-Assistant-API-Key** aus. Bestehende Automatisierungen laufen also weiter, ohne dass du etwas anpasst. Der Key selbst (`/api/ha/key`) ist mit eingeschaltetem Schutz nur noch angemeldet lesbar.
+
+Weiteres zum Verhalten:
+
+- Das Gerät, das den Schutz einschaltet, bleibt angemeldet — man sperrt sich nicht selbst aus.
+- Das Passwort liegt nur als Hash in `config.json`, niemals im Klartext, und wird nie über die API herausgegeben.
+- Ein **Passwortwechsel meldet alle anderen Geräte ab**; genau dafür wechselt man es.
+- Zehn Fehlversuche hintereinander sperren die Anmeldung für fünf Minuten.
+- Die Sitzung gilt 30 Tage und übersteht einen Neustart des Containers.
+
+Kein Passwort mehr? Dann in `data/config.json` `"auth_enabled": false` setzen und den Container neu starten.
+
 ## Sicherheitsnotiz
 
-Die Anwendung ist für ein vertrauenswürdiges Heim- oder LAN-Netz vorgesehen und hat bewusst keine eigene Benutzeranmeldung — der Home-Assistant-API-Key schützt nur die `/api/ha/*`-Endpunkte, nicht die Oberfläche. Stelle den Port `8080` nicht ungeschützt ins Internet. Paperless-Token und API-Key liegen im persistenten Volume im Klartext; schütze daher den Ordner `data` und sichere ihn nicht unbedacht in öffentliche Repositories.
+Ohne eingeschalteten Zugriffsschutz hat die Anwendung keine Benutzeranmeldung — der Home-Assistant-API-Key schützt dann nur die `/api/ha/*`-Endpunkte, nicht die Oberfläche. Stelle den Port `8080` in keinem Fall ungeschützt ins Internet; der Zugriffsschutz ist als Schranke im eigenen Netz gedacht, nicht als Härtung gegen das offene Netz. Paperless-Token und API-Key liegen im persistenten Volume im Klartext; schütze daher den Ordner `data` und sichere ihn nicht unbedacht in öffentliche Repositories.

@@ -276,6 +276,15 @@
               <button type="button" data-value="Feeder">Einzug</button>
             </div>
           </div>
+          <label class="switch" id="duplex-row"><input id="duplex" type="checkbox"><i></i><span>Beidseitig einziehen</span></label>
+          <div class="seg-group"><span class="seg-label">Papier</span>
+            <div class="seg" data-target="paper-size">
+              <button type="button" data-value="A4">A4</button>
+              <button type="button" data-value="Letter">Letter</button>
+              <button type="button" data-value="Legal">Legal</button>
+              <button type="button" data-value="A5">A5</button>
+            </div>
+          </div>
           <div class="seg-group"><span class="seg-label">Auflösung</span>
             <div class="seg" data-target="resolution">
               <button type="button" data-value="75">75</button>
@@ -303,6 +312,26 @@
           <label class="switch"><input id="quick-tags-enabled" type="checkbox"><i></i><span>Schnell-Tags aus Paperless anbieten</span></label>
           <label class="switch"><input id="prewarm-enabled" type="checkbox"><i></i><span>Scanner beim Öffnen der App aufwecken</span></label>
           <p class="hint">Zusatzfunktionen bleiben aus, damit das Dashboard schlank bleibt.</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>Zugriffsschutz</h2></div>
+          <p class="hint">Aus, weil ScanDeck für das eigene Netz gedacht ist. Eingeschaltet verlangt die Oberfläche ein Passwort — sinnvoll, wenn Gäste im WLAN sind oder mehrere Haushalte am selben Netz hängen. Die Home-Assistant-Schnittstelle bleibt über ihren API-Key erreichbar.</p>
+          <div id="auth-off">
+            <label class="field"><span>Passwort vergeben (mind. 8 Zeichen)</span><input id="auth-password" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+            <label class="field"><span>Passwort wiederholen</span><input id="auth-password-repeat" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+            <button id="auth-enable" class="btn primary" type="button">Zugriffsschutz einschalten</button>
+          </div>
+          <div id="auth-on" hidden>
+            <p class="hint ok">Zugriffsschutz ist aktiv.</p>
+            <label class="field"><span>Bisheriges Passwort</span><input id="auth-current" type="password" autocomplete="current-password" placeholder="••••••••"></label>
+            <label class="field"><span>Neues Passwort</span><input id="auth-new" type="password" autocomplete="new-password" placeholder="••••••••"></label>
+            <div class="row-buttons">
+              <button id="auth-change" class="btn ghost" type="button">Passwort ändern</button>
+              <button id="auth-disable" class="btn ghost danger" type="button">Ausschalten</button>
+            </div>
+            <button id="auth-logout" class="btn ghost" type="button">Auf diesem Gerät abmelden</button>
+          </div>
         </section>
 
         <section class="card">
@@ -405,6 +434,21 @@
           <button id="preview-close" class="btn primary" type="button">Fertig</button>
         </footer>
       </div>
+    </div>
+
+    <!-- ───────────────────────── Login overlay ───────────────────────── -->
+    <div id="login-overlay" class="overlay" hidden>
+      <form id="login-form" class="login-sheet" autocomplete="on">
+        <img class="login-mark" src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="" aria-hidden="true">
+        <h2>ScanDeck ist geschützt</h2>
+        <p class="hint">Bitte das Passwort eingeben, das unter „Zugriffsschutz“ vergeben wurde.</p>
+        <label class="field">
+          <span>Passwort</span>
+          <input id="login-password" type="password" autocomplete="current-password" required>
+        </label>
+        <p id="login-error" class="login-error" role="alert" hidden></p>
+        <button id="login-submit" class="btn primary" type="submit">Anmelden</button>
+      </form>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

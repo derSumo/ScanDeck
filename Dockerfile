@@ -19,6 +19,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY VERSION app.py ./
+COPY scandeck ./scandeck
 COPY templates ./templates
 COPY static ./static
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -41,4 +42,8 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4).status == 200 else 1)"
 
-CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "--bind", "0.0.0.0:8080", "app:app"]
+# Ein Worker haelt den gesamten Zustand (Scan-Sperre, Stapel, Warteschlange) im
+# Speicher, deshalb bleibt es bei einem. Jede offene Oberflaeche belegt einen
+# Thread dauerhaft fuer den Ereignisstrom, daher reichlich davon: bei acht
+# antwortete der Dienst ab dem achten Tab nicht mehr.
+CMD ["gunicorn", "--workers", "1", "--threads", "32", "--timeout", "0", "--bind", "0.0.0.0:8080", "app:app"]

@@ -1,28 +1,23 @@
-"""Paperless Scanner Hub: eSCL scan orchestration and Paperless-ngx upload."""
+"""ScanDeck: the HTTP surface and the workers that drive a scan.
+
+Everything that can stand on its own lives in the scandeck package; this module
+wires those parts to Flask, owns the mutable run state and keeps the background
+loop for uploads, confirmations and cleanup.
+"""
 
 from __future__ import annotations
 
-import io
-import json
-import os
-import queue
-import re
 import secrets
-import socket
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from functools import wraps
-from ipaddress import IPv4Address, IPv4Network, ip_address, ip_network
-from pathlib import Path
-from typing import Any, Callable, Iterator
-from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from functools import wraps
+from pathlib import Path
+from typing import Any, Callable
 
 import requests
-import urllib3
 from flask import (
     Flask,
     Response,
@@ -31,934 +26,55 @@ from flask import (
     request,
     send_file,
     send_from_directory,
+    session,
     stream_with_context,
 )
 
-
-def read_version() -> str:
-    """Single source of truth for the semantic version: the VERSION file."""
-    try:
-        return Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "0.0.0"
-
-
-APP_VERSION = read_version()
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "derSumo/ScanDeck")
-RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
-UPDATE_CACHE_SECONDS = 6 * 3600
-APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/data"))
-CONFIG_PATH = APP_DATA_DIR / "config.json"
-BATCH_DIR = APP_DATA_DIR / "batch"
-DEFAULT_OUTPUT_DIR = os.environ.get("SCAN_OUTPUT_DIR", "/scans")
-PWG_NS = "http://www.pwg.org/schemas/2010/12/sm"
-SCAN_NS = "http://schemas.hp.com/imaging/escl/2011/05/03"
-REQUEST_ESCL_VERSION = "2.0"
-
-
-DEFAULT_CONFIG: dict[str, Any] = {
-    # Everything a user has to decide starts out empty so the setup wizard owns
-    # the first run instead of shipping someone else's network as a default.
-    "scanner_url": os.environ.get("SCANNER_URL", ""),
-    "verify_scanner_ssl": False,
-    "paperless_url": os.environ.get("PAPERLESS_URL", ""),
-    "paperless_token": os.environ.get("PAPERLESS_TOKEN", ""),
-    "output_dir": DEFAULT_OUTPUT_DIR,
-    "default_tags": [],
-    "create_missing_tags": True,
-    "discovery_subnet": os.environ.get("DISCOVERY_SUBNET", ""),
-    "source": "Platen",
-    "resolution": 300,
-    "color_mode": "RGB24",
-    "output_format": "application/pdf",
-    "upload_to_paperless": False,
-    "title_prefix": "Scan",
-    "preview_seconds": 10,
-    "update_check": True,
-    # Extras bleiben aus, damit die Startoberflaeche schlank bleibt.
-    "metadata_enabled": False,
-    "quick_tags_enabled": False,
-    "cleanup_enabled": False,
-    "cleanup_hours": 24,
-    "prewarm_enabled": True,
-    "setup_complete": False,
-    "ha_enabled": False,
-    "ha_api_key": "",
-    "ha_webhook_url": "",
-}
-
-SECRET_KEYS = ("paperless_token", "ha_api_key")
-
-ALLOWED_SOURCES = {"Platen", "Feeder"}
-ALLOWED_RESOLUTIONS = {75, 100, 150, 200, 300, 600, 1200}
-ALLOWED_COLOR_MODES = {"RGB24", "Grayscale8", "BlackAndWhite1"}
-ALLOWED_FORMATS = {"image/jpeg", "application/pdf"}
-
-
-class LogHub:
-    """A small in-memory event fan-out for the single-process Docker service."""
-
-    def __init__(self) -> None:
-        self._subscribers: list[queue.Queue[dict[str, Any]]] = []
-        self._lock = threading.Lock()
-        self.history: list[dict[str, Any]] = []
-
-    def publish(self, message: str, level: str = "info") -> None:
-        self._emit({
-            "kind": "log",
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "level": level,
-            "message": message,
-        })
-
-    def progress(self, stage: str, percent: int, **extra: Any) -> None:
-        """Push a scan progress tick to every connected client."""
-        percent = max(0, min(100, int(percent)))
-        scan_state["stage"] = stage
-        scan_state["progress"] = percent
-        self._emit({"kind": "progress", "stage": stage, "progress": percent, **extra})
-
-    def _emit(self, event: dict[str, Any]) -> None:
-        with self._lock:
-            if event["kind"] == "log":
-                self.history.append(event)
-                self.history = self.history[-200:]
-            for subscriber in self._subscribers.copy():
-                try:
-                    subscriber.put_nowait(event)
-                except queue.Full:
-                    pass
-
-    def stream(self) -> Iterator[str]:
-        subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=100)
-        with self._lock:
-            self._subscribers.append(subscriber)
-            history = self.history.copy()
-        try:
-            for event in history:
-                yield f"data: {json.dumps(event)}\n\n"
-            while True:
-                try:
-                    event = subscriber.get(timeout=15)
-                    yield f"data: {json.dumps(event)}\n\n"
-                except queue.Empty:
-                    yield ": heartbeat\n\n"
-        finally:
-            with self._lock:
-                if subscriber in self._subscribers:
-                    self._subscribers.remove(subscriber)
-
-
-class ConfigStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._config = self._load()
-
-    def _load(self) -> dict[str, Any]:
-        try:
-            stored = json.loads(self.path.read_text(encoding="utf-8"))
-            merged = {**DEFAULT_CONFIG, **stored}
-            # Configs written before the wizard existed are already set up.
-            if "setup_complete" not in stored:
-                merged["setup_complete"] = bool(merged.get("scanner_url"))
-            return merged
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return DEFAULT_CONFIG.copy()
-
-    def exists(self) -> bool:
-        return self.path.exists()
-
-    def get(self) -> dict[str, Any]:
-        with self._lock:
-            return self._config.copy()
-
-    def public(self) -> dict[str, Any]:
-        return self._public_from_config(self.get())
-
-    @staticmethod
-    def _public_from_config(config: dict[str, Any]) -> dict[str, Any]:
-        public_config = config.copy()
-        public_config["paperless_token_configured"] = bool(public_config.pop("paperless_token", ""))
-        # The Home Assistant key has to be readable once so users can copy it
-        # into their automation; it is generated locally and never leaves the LAN.
-        public_config["ha_api_key_configured"] = bool(public_config.get("ha_api_key"))
-        return public_config
-
-    def save(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            updated = {**self._config}
-            for key in DEFAULT_CONFIG:
-                if key in payload and key not in SECRET_KEYS:
-                    updated[key] = payload[key]
-            for key in SECRET_KEYS:
-                if key in payload and str(payload[key]).strip():
-                    updated[key] = str(payload[key]).strip()
-            updated = validate_config(updated)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(updated, indent=2), encoding="utf-8")
-            self._config = updated
-        return self._public_from_config(updated)
-
-    def patch(self, **values: Any) -> dict[str, Any]:
-        with self._lock:
-            updated = validate_config({**self._config, **values})
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(updated, indent=2), encoding="utf-8")
-            self._config = updated
-        return self._public_from_config(updated)
-
-
-def normalise_url(value: str, field_name: str, required: bool = False) -> str:
-    value = str(value or "").strip().rstrip("/")
-    if not value and required:
-        raise ValueError(f"{field_name} darf nicht leer sein.")
-    if value and not re.match(r"^https?://", value, re.IGNORECASE):
-        raise ValueError(f"{field_name} muss mit http:// oder https:// beginnen.")
-    return value
-
-
-def validate_config(config: dict[str, Any]) -> dict[str, Any]:
-    # Empty endpoints stay valid: an unconfigured instance must be storable so
-    # the wizard can save progress step by step.
-    config["scanner_url"] = normalise_url(config.get("scanner_url", ""), "Scanner-URL")
-    config["paperless_url"] = normalise_url(config.get("paperless_url", ""), "Paperless-URL")
-    config["ha_webhook_url"] = normalise_url(config.get("ha_webhook_url", ""), "Home-Assistant-Webhook")
-    config["discovery_subnet"] = str(config.get("discovery_subnet", "")).strip()
-    config["verify_scanner_ssl"] = bool(config.get("verify_scanner_ssl"))
-    config["source"] = config.get("source", "Platen")
-    config["resolution"] = int(config.get("resolution", 300))
-    config["color_mode"] = config.get("color_mode", "RGB24")
-    config["output_format"] = config.get("output_format", "application/pdf")
-    config["upload_to_paperless"] = bool(config.get("upload_to_paperless"))
-    config["create_missing_tags"] = bool(config.get("create_missing_tags", True))
-    config["title_prefix"] = str(config.get("title_prefix", "Scan")).strip() or "Scan"
-    config["update_check"] = bool(config.get("update_check"))
-    config["metadata_enabled"] = bool(config.get("metadata_enabled"))
-    config["quick_tags_enabled"] = bool(config.get("quick_tags_enabled"))
-    config["cleanup_enabled"] = bool(config.get("cleanup_enabled"))
-    config["prewarm_enabled"] = bool(config.get("prewarm_enabled"))
-    config["cleanup_hours"] = max(1, min(8760, int(config.get("cleanup_hours", 24) or 24)))
-    config["setup_complete"] = bool(config.get("setup_complete"))
-    config["ha_enabled"] = bool(config.get("ha_enabled"))
-    config["ha_api_key"] = str(config.get("ha_api_key", "")).strip()
-    config["preview_seconds"] = max(0, min(60, int(config.get("preview_seconds", 10))))
-
-    if config["source"] not in ALLOWED_SOURCES:
-        raise ValueError("Unbekannte Scanquelle.")
-    if config["resolution"] not in ALLOWED_RESOLUTIONS:
-        raise ValueError("Nicht unterstützte Auflösung.")
-    if config["color_mode"] not in ALLOWED_COLOR_MODES:
-        raise ValueError("Nicht unterstützter Farbmodus.")
-    if config["output_format"] not in ALLOWED_FORMATS:
-        raise ValueError("Nicht unterstütztes Ausgabeformat.")
-
-    if config["discovery_subnet"]:
-        try:
-            discovery_network = ip_network(config["discovery_subnet"], strict=False)
-        except ValueError as error:
-            raise ValueError("Netzwerk für die Scanner-Suche ist ungültig.") from error
-        if (
-            not isinstance(discovery_network, IPv4Network)
-            or not discovery_network.is_private
-            or discovery_network.num_addresses > 256
-        ):
-            raise ValueError("Die Scanner-Suche akzeptiert nur private IPv4-Netze bis /24.")
-        config["discovery_subnet"] = str(discovery_network)
-
-    output_dir = Path(str(config.get("output_dir") or DEFAULT_OUTPUT_DIR)).expanduser()
-    if not output_dir.is_absolute():
-        raise ValueError("Scan-Ausgabeverzeichnis muss ein absoluter Pfad im Container sein.")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config["output_dir"] = str(output_dir)
-
-    tags = config.get("default_tags", [])
-    if not isinstance(tags, list):
-        raise ValueError("Standard-Tags müssen eine Liste sein.")
-    config["default_tags"] = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
-    return config
-
-
-def parse_version(value: str) -> tuple[int, ...]:
-    """Turn "v1.2.3" into (1, 2, 3); anything unparsable sorts lowest."""
-    core = re.split(r"[-+]", str(value or "").strip().lstrip("vV"), maxsplit=1)[0]
-    parts = [int(part) for part in re.findall(r"\d+", core)[:3]]
-    return tuple(parts + [0] * (3 - len(parts))) if parts else (0, 0, 0)
-
-
-update_cache: dict[str, Any] = {"checked_at": 0.0, "latest": "", "url": RELEASES_URL, "error": ""}
-update_lock = threading.Lock()
-
-
-def check_for_update(force: bool = False) -> dict[str, Any]:
-    """Ask GitHub for the newest release, at most once every few hours."""
-    with update_lock:
-        fresh = time.time() - update_cache["checked_at"] < UPDATE_CACHE_SECONDS
-        if not fresh or force:
-            headers = {"Accept": "application/vnd.github+json", "User-Agent": f"ScanDeck/{APP_VERSION}"}
-            try:
-                response = requests.get(
-                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-                    headers=headers,
-                    timeout=8,
-                )
-                if response.status_code == 404:
-                    # No published release yet: the newest semver tag is just as good.
-                    tags = requests.get(
-                        f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=100",
-                        headers=headers,
-                        timeout=8,
-                    )
-                    tags.raise_for_status()
-                    names = [str(tag.get("name", "")) for tag in tags.json()]
-                    newest = max(names, key=parse_version, default="")
-                    update_cache.update({
-                        "latest": newest.lstrip("vV"),
-                        "url": f"{RELEASES_URL}/tag/{newest}" if newest else RELEASES_URL,
-                        "error": "",
-                    })
-                else:
-                    response.raise_for_status()
-                    body = response.json()
-                    update_cache.update({
-                        "latest": str(body.get("tag_name") or body.get("name") or "").lstrip("vV"),
-                        "url": body.get("html_url") or RELEASES_URL,
-                        "error": "",
-                    })
-            except (requests.RequestException, ValueError) as error:
-                update_cache["error"] = str(error)
-            update_cache["checked_at"] = time.time()
-
-        latest = update_cache["latest"]
-        return {
-            "current": APP_VERSION,
-            "latest": latest,
-            "update_available": bool(latest) and parse_version(latest) > parse_version(APP_VERSION),
-            "url": update_cache["url"],
-            "checked_at": update_cache["checked_at"],
-            "error": update_cache["error"],
-        }
-
-
-def guess_local_subnet() -> str:
-    """Best guess for the /24 the container lives in, used to prefill the wizard."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("10.255.255.255", 1))
-        address = probe.getsockname()[0]
-    except OSError:
-        return ""
-    finally:
-        probe.close()
-    return subnet_of(address)
-
-
-def subnet_of(address: str) -> str:
-    """The /24 an IPv4 address belongs to, or "" if it is not a usable private one."""
-    try:
-        host = ip_address(str(address or "").strip())
-    except ValueError:
-        return ""
-    if not isinstance(host, IPv4Address) or not host.is_private or host.is_loopback or host.is_link_local:
-        return ""
-    return str(ip_network(f"{host}/24", strict=False))
-
-
-def is_container_network(subnet: str) -> bool:
-    """Docker's own bridge ranges never hold the scanner, so they rank last."""
-    try:
-        network = ip_network(subnet, strict=False)
-    except ValueError:
-        return True
-    return any(network.subnet_of(ip_network(pool)) for pool in ("172.17.0.0/16", "172.18.0.0/15", "10.88.0.0/16"))
-
-
-# Typical home router defaults, tried when nothing better is known.
-COMMON_SUBNETS = (
-    "192.168.0.0/24",
-    "192.168.1.0/24",
-    "192.168.178.0/24",  # AVM Fritz!Box
-    "192.168.2.0/24",
-    "10.0.0.0/24",
+from scandeck import auth
+from scandeck.batch import BatchCollector
+from scandeck.config import (
+    APP_DATA_DIR,
+    BATCH_DIR,
+    CONFIG_PATH,
+    JOBS_PATH,
+    PAPER_SIZES,
+    TIMINGS_PATH,
+    ConfigStore,
+    validate_config,
 )
-
-
-def candidate_subnets(config: dict[str, Any], client_address: str | None = None) -> list[str]:
-    """Rank the networks worth probing, best hint first.
-
-    The device that opens the interface sits on the same LAN as the scanner, so
-    its address beats everything the container can see about itself: in Docker's
-    default bridge mode the container only knows its 172.x network.
-    """
-    candidates: list[str] = []
-    fallbacks: list[str] = []
-
-    def add(subnet: str) -> None:
-        # Container networks never hold the scanner, so they go to the very end
-        # instead of wasting the first search round.
-        target = fallbacks if is_container_network(subnet) else candidates
-        if subnet and subnet not in candidates and subnet not in fallbacks:
-            target.append(subnet)
-
-    add(subnet_of(client_address or ""))
-    for url in (config.get("paperless_url", ""), config.get("scanner_url", "")):
-        host = urlparse(url).hostname if url else None
-        if host:
-            add(subnet_of(host))
-    add(guess_local_subnet())
-    for subnet in COMMON_SUBNETS:
-        add(subnet)
-    return candidates + fallbacks
-
-
-# One session for every talk to the scanner. Each scan needs three requests
-# (status, job, document) and HTTPS costs a full TLS handshake per connection —
-# keeping it alive saves that handshake within a scan and between scans.
-scanner_session = requests.Session()
-scanner_session.headers.update({"User-Agent": f"ScanDeck/{APP_VERSION}", "Connection": "keep-alive"})
-scanner_session.mount(
-    "https://",
-    requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0),
+from scandeck.documents import (
+    merge_files,
+    normalise_rotation,
+    page_count,
+    preview_cache,
+    render_preview,
 )
-scanner_session.mount(
-    "http://",
-    requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0),
+from scandeck.escl import ScannerClient
+from scandeck.events import LogHub, TooManySubscribers
+from scandeck.jobs import JobStore, TimingStore
+from scandeck.network import (
+    autodiscover_scanners,
+    candidate_subnets,
+    discover_escl_scanners,
+    guess_local_subnet,
 )
+from scandeck.paperless import PaperlessClient
+from scandeck.updates import check_for_update
+from scandeck.version import APP_VERSION, RELEASES_URL
 
-
-class JobStore:
-    """Every scan and what became of it, so nothing gets lost silently.
-
-    A scan is only ever deleted once Paperless confirmed the document. Until
-    then the entry stays in the queue and is retried, which also means the
-    cleanup can never remove a file whose upload is still open.
-    """
-
-    # pending  -> waiting for its (first or next) upload attempt
-    # processing -> Paperless accepted the file, task is running
-    # success  -> document exists in Paperless, file may be cleaned up
-    # duplicate/failed -> needs a decision, file is kept
-    # local    -> upload is switched off, file is kept
-    OPEN_STATES = ("pending", "processing")
-    RETRY_DELAYS = (30, 120, 300, 900, 3600)  # seconds, then hourly
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._jobs = self._load()
-
-    def _load(self) -> list[dict[str, Any]]:
-        try:
-            stored = json.loads(self.path.read_text(encoding="utf-8"))
-            return stored if isinstance(stored, list) else []
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return []
-
-    def _write(self) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self._jobs[-500:], indent=2), encoding="utf-8")
-        except OSError as error:
-            print(f"ScanDeck: Verlauf nicht gespeichert: {error}", file=sys.stderr, flush=True)
-
-    def add(self, file_path: Path, status: str, pages: int = 1, tags: list[str] | None = None) -> dict[str, Any]:
-        job = {
-            "id": secrets.token_hex(8),
-            "name": file_path.name,
-            "path": str(file_path),
-            "created": datetime.now().isoformat(timespec="seconds"),
-            "status": status,
-            "pages": pages,
-            "tags": tags or [],
-            "task_id": None,
-            "document_id": None,
-            "error": None,
-            "attempts": 0,
-            "next_attempt": 0.0,
-            "confirmed_at": None,
-            "file_deleted": False,
-        }
-        with self._lock:
-            self._jobs.append(job)
-            self._write()
-        return job.copy()
-
-    def update(self, job_id: str, **values: Any) -> dict[str, Any] | None:
-        with self._lock:
-            for job in self._jobs:
-                if job["id"] == job_id:
-                    job.update(values)
-                    self._write()
-                    return job.copy()
-        return None
-
-    def get(self, job_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            return next((job.copy() for job in self._jobs if job["id"] == job_id), None)
-
-    def remove(self, job_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            for index, job in enumerate(self._jobs):
-                if job["id"] == job_id:
-                    removed = self._jobs.pop(index)
-                    self._write()
-                    return removed
-        return None
-
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._lock:
-            return [job.copy() for job in reversed(self._jobs[-limit:])]
-
-    def due(self, status: str) -> list[dict[str, Any]]:
-        now = time.time()
-        with self._lock:
-            return [job.copy() for job in self._jobs
-                    if job["status"] == status and job.get("next_attempt", 0) <= now]
-
-    def pending_count(self) -> int:
-        with self._lock:
-            return sum(1 for job in self._jobs if job["status"] in self.OPEN_STATES)
-
-    def schedule_retry(self, job_id: str, error: str) -> None:
-        job = self.get(job_id)
-        attempts = int(job["attempts"]) + 1 if job else 1
-        delay = self.RETRY_DELAYS[min(attempts - 1, len(self.RETRY_DELAYS) - 1)]
-        self.update(job_id, status="pending", attempts=attempts, error=error, next_attempt=time.time() + delay)
-
-
-class TimingStore:
-    """Remembers how long a scan takes per profile so the bar can be honest.
-
-    A 600 dpi colour scan takes many times longer than 300 dpi grayscale, so one
-    average would be useless — every combination gets its own running mean.
-    """
-
-    SMOOTHING = 0.4  # weight of the newest measurement
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-        self._data = self._load()
-
-    def _load(self) -> dict[str, dict[str, float]]:
-        try:
-            stored = json.loads(self.path.read_text(encoding="utf-8"))
-            return stored if isinstance(stored, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-    @staticmethod
-    def key(config: dict[str, Any]) -> str:
-        return "|".join(str(config.get(field, "")) for field in
-                        ("source", "resolution", "color_mode", "output_format"))
-
-    def expected(self, key: str) -> float | None:
-        with self._lock:
-            entry = self._data.get(key)
-        # A single measurement can be an outlier (cold lamp, sleeping device).
-        return float(entry["seconds"]) if entry and entry.get("samples", 0) >= 1 else None
-
-    def record(self, key: str, seconds: float) -> None:
-        if seconds <= 0 or seconds > 3600:
-            return
-        with self._lock:
-            entry = self._data.get(key)
-            if entry:
-                entry["seconds"] = round(entry["seconds"] * (1 - self.SMOOTHING) + seconds * self.SMOOTHING, 2)
-                entry["samples"] = int(entry.get("samples", 1)) + 1
-            else:
-                entry = {"seconds": round(seconds, 2), "samples": 1}
-            self._data[key] = entry
-            snapshot = dict(self._data)
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-        except OSError:
-            pass  # a read-only volume must not break the scan itself
-
-    def summary(self) -> dict[str, dict[str, float]]:
-        with self._lock:
-            return dict(self._data)
-
-
-class ScannerClient:
-    def __init__(self, config: dict[str, Any], log: LogHub) -> None:
-        self.config = config
-        self.log = log
-        self.verify_ssl = config["verify_scanner_ssl"]
-        if not self.verify_ssl:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    @property
-    def base_url(self) -> str:
-        url = self.config.get("scanner_url", "")
-        if not url:
-            raise RuntimeError("Kein Scanner konfiguriert. Bitte im Einrichtungsassistenten hinterlegen.")
-        return url
-
-    def _get(self, endpoint: str, timeout: int = 20) -> requests.Response:
-        return scanner_session.get(
-            f"{self.base_url}/eSCL/{endpoint}",
-            verify=self.verify_ssl,
-            timeout=timeout,
-        )
-
-    def capabilities(self) -> dict[str, Any]:
-        self.log.publish("Lese ScannerCapabilities …")
-        response = self._get("ScannerCapabilities")
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-        version = root.findtext(f".//{{{PWG_NS}}}Version", default="unbekannt")
-        model = root.findtext(f".//{{{PWG_NS}}}MakeAndModel", default="eSCL-Scanner")
-        sources = []
-        if root.find(f".//{{{SCAN_NS}}}PlatenInputCaps") is not None:
-            sources.append("Platen")
-        if root.find(f".//{{{SCAN_NS}}}AdfSimplexInputCaps") is not None:
-            sources.append("Feeder")
-        self.log.publish(
-            f"Scanner erreichbar · eSCL {version} · Quellen: {', '.join(sources) or 'unbekannt'}",
-            "success",
-        )
-        return {"version": version, "model": model, "sources": sources}
-
-    def status(self) -> str:
-        response = self._get("ScannerStatus")
-        response.raise_for_status()
-        root = ET.fromstring(response.text)
-        return root.findtext(f".//{{{PWG_NS}}}State", default="Unknown")
-
-    def scan(self) -> Path:
-        settings = self._build_settings()
-        started = time.monotonic()
-        self.log.progress("connect", 8)
-        status = self.status()
-        self.log.publish(f"Scannerstatus: {status}")
-        if status != "Idle":
-            raise RuntimeError(f"Scanner ist nicht bereit (Status: {status}).")
-
-        self.log.progress("job", 18)
-        self.log.publish(f"Starte {self.config['source']}-Scan mit {self.config['resolution']} dpi …")
-        response = scanner_session.post(
-            f"{self.base_url}/eSCL/ScanJobs",
-            data=settings.encode("utf-8"),
-            headers={"Content-Type": "text/xml", "Accept": "*/*"},
-            verify=self.verify_ssl,
-            timeout=30,
-        )
-        if response.status_code != 201:
-            raise RuntimeError(f"ScanJob abgelehnt (HTTP {response.status_code}).")
-
-        location = response.headers.get("Location")
-        if not location:
-            raise RuntimeError("ScanJob wurde ohne Location-Header erstellt.")
-        job_url = urljoin(f"{self.base_url}/", location)
-        self.log.publish("ScanJob angenommen; warte auf das Dokument …", "success")
-
-        # The scanner streams for as long as the paper takes. With a measured
-        # duration for this profile the bar tracks real time instead of guessing.
-        timing_key = TimingStore.key(self.config)
-        expected = timings.expected(timing_key)
-        if expected:
-            self.log.publish(f"Erwartete Dauer für dieses Profil: ~{expected:.0f}s")
-        capture_started = time.monotonic()
-        with progress_ramp(self.log, "capture", start=25, end=78, expected=expected):
-            document = scanner_session.get(
-                f"{job_url.rstrip('/')}/NextDocument",
-                headers={"Accept": "image/jpeg, application/pdf, application/octet-stream"},
-                verify=self.verify_ssl,
-                timeout=180,
-            )
-            document.raise_for_status()
-        if not document.content:
-            raise RuntimeError("Der Scanner hat ein leeres Dokument geliefert.")
-        timings.record(timing_key, time.monotonic() - capture_started)
-
-        self.log.progress("store", 82)
-        content_type = document.headers.get("Content-Type", "").lower()
-        extension = ".pdf" if "pdf" in content_type or self.config["output_format"] == "application/pdf" else ".jpg"
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir = Path(self.config["output_dir"])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        target = output_dir / f"scan_{timestamp}{extension}"
-        target.write_bytes(document.content)
-        self.log.publish(
-            f"Scan gespeichert: {target.name} ({len(document.content):,} Bytes, "
-            f"{time.monotonic() - started:.1f}s)",
-            "success",
-        )
-        return target
-
-    def _build_settings(self) -> str:
-        source = self.config["source"]
-        duplex = "\n  <scan:Duplex>false</scan:Duplex>" if source == "Feeder" else ""
-        document_format = self.config["output_format"]
-        return f"""<?xml version="1.0" encoding="UTF-8"?>
-<scan:ScanSettings xmlns:pwg="{PWG_NS}" xmlns:scan="{SCAN_NS}">
-  <pwg:Version>{REQUEST_ESCL_VERSION}</pwg:Version>
-  <pwg:ScanRegions>
-    <pwg:ScanRegion>
-      <pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>
-      <pwg:XOffset>0</pwg:XOffset>
-      <pwg:YOffset>0</pwg:YOffset>
-      <pwg:Width>2480</pwg:Width>
-      <pwg:Height>3508</pwg:Height>
-    </pwg:ScanRegion>
-  </pwg:ScanRegions>
-  <pwg:InputSource>{source}</pwg:InputSource>
-  <scan:ColorMode>{self.config['color_mode']}</scan:ColorMode>
-  <pwg:DocumentFormat>{document_format}</pwg:DocumentFormat>
-  <scan:DocumentFormatExt>{document_format}</scan:DocumentFormatExt>
-  <scan:XResolution>{self.config['resolution']}</scan:XResolution>
-  <scan:YResolution>{self.config['resolution']}</scan:YResolution>{duplex}
-</scan:ScanSettings>"""
-
-
-class progress_ramp:
-    """Eases the progress bar forward while a blocking call is in flight.
-
-    With a measured duration for this scan profile the bar moves in real time and
-    can name the seconds left; without one it falls back to an asymptotic curve
-    that never quite arrives.
-    """
-
-    def __init__(
-        self,
-        log: LogHub,
-        stage: str,
-        start: int,
-        end: int,
-        expected: float | None = None,
-        step_seconds: float = 0.5,
-    ) -> None:
-        self.log = log
-        self.stage = stage
-        self.start = start
-        self.end = end
-        self.expected = expected if expected and expected > 0 else None
-        self.step_seconds = step_seconds
-        self._done = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def __enter__(self) -> "progress_ramp":
-        self.log.progress(self.stage, self.start, eta=round(self.expected) if self.expected else None)
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        return self
-
-    def _run(self) -> None:
-        started = time.monotonic()
-        current = float(self.start)
-        span = self.end - self.start
-        while not self._done.wait(self.step_seconds):
-            elapsed = time.monotonic() - started
-            if self.expected:
-                share = elapsed / self.expected
-                if share < 1:
-                    current = self.start + span * share
-                    eta = max(0, round(self.expected - elapsed))
-                else:
-                    # Slower than usual: creep on so the bar never looks stuck.
-                    current += (self.end - current) * 0.08
-                    eta = None
-            else:
-                current += (self.end - current) * 0.12
-                eta = None
-            self.log.progress(self.stage, round(min(current, self.end)), eta=eta)
-
-    def __exit__(self, *_exc: object) -> None:
-        self._done.set()
-        if self._thread:
-            self._thread.join(timeout=1)
-
-
-def discover_escl_scanners(config: dict[str, Any], log: LogHub) -> list[dict[str, str]]:
-    """Probe a bounded private IPv4 subnet for secure eSCL ScannerCapabilities."""
-    subnet = config.get("discovery_subnet") or guess_local_subnet()
-    if not subnet:
-        raise ValueError("Kein Netzwerk für die Suche angegeben.")
-    network = ip_network(subnet, strict=False)
-    assert isinstance(network, IPv4Network)
-    if not config["verify_scanner_ssl"]:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    log.publish(f"Suche eSCL-Scanner in {network} …")
-
-    def probe(address: str) -> dict[str, str] | None:
-        base_url = f"https://{address}:443"
-        try:
-            # Avoid waiting for an HTTPS timeout on every unused address. The
-            # actual capability request gets enough time for slower HP firmware.
-            with socket.create_connection((address, 443), timeout=0.35):
-                pass
-            response = requests.get(
-                f"{base_url}/eSCL/ScannerCapabilities",
-                verify=config["verify_scanner_ssl"],
-                timeout=7,
-            )
-            if response.status_code != 200:
-                return None
-            root = ET.fromstring(response.text)
-            model = root.findtext(f".//{{{PWG_NS}}}MakeAndModel", default="eSCL-Scanner")
-            version = root.findtext(f".//{{{PWG_NS}}}Version", default="?")
-            return {"url": base_url, "model": model, "version": version}
-        except (OSError, requests.RequestException, ET.ParseError):
-            return None
-
-    devices: list[dict[str, str]] = []
-    addresses = [str(host) for host in network.hosts()]
-    with ThreadPoolExecutor(max_workers=32) as executor:
-        futures = [executor.submit(probe, address) for address in addresses]
-        for future in as_completed(futures):
-            device = future.result()
-            if device:
-                devices.append(device)
-    devices.sort(key=lambda device: device["url"])
-    log.publish(
-        f"Scanner-Suche abgeschlossen · {len(devices)} Gerät(e) gefunden.",
-        "success" if devices else "warning",
-    )
-    return devices
-
-
-def autodiscover_scanners(
-    config: dict[str, Any],
-    log: LogHub,
-    client_address: str | None = None,
-    limit: int = 4,
-) -> tuple[list[dict[str, str]], str]:
-    """Probe the likeliest networks in order and stop at the first hit."""
-    candidates = candidate_subnets(config, client_address)[:limit]
-    log.publish(f"Automatische Suche in: {', '.join(candidates)}")
-    for subnet in candidates:
-        devices = discover_escl_scanners({**config, "discovery_subnet": subnet}, log)
-        if devices:
-            return devices, subnet
-    return [], ""
-
-
-class PaperlessClient:
-    def __init__(self, config: dict[str, Any], log: LogHub) -> None:
-        self.config = config
-        self.log = log
-        self.base_url = config["paperless_url"].rstrip("/")
-        self.headers = {"Authorization": f"Token {config['paperless_token']}"}
-
-    def test(self) -> None:
-        self._require_config()
-        response = requests.get(f"{self.base_url}/api/documents/?page_size=1", headers=self.headers, timeout=20)
-        response.raise_for_status()
-        self.log.publish("Paperless-ngx erreichbar und Token akzeptiert.", "success")
-
-    def upload(self, file_path: Path) -> str:
-        """Hand the file to Paperless and return the task id it answers with."""
-        self._require_config()
-        tag_ids = self._resolve_tags()
-        data: list[tuple[str, str]] = [("title", f"{self.config['title_prefix']} {datetime.now():%Y-%m-%d %H:%M}")]
-        data.extend(("tags", str(tag_id)) for tag_id in tag_ids)
-        for field in ("correspondent", "document_type"):
-            value = self.config.get(field)
-            if value:
-                data.append((field, str(value)))
-        self.log.publish(f"Lade {file_path.name} nach Paperless-ngx hoch …")
-        with file_path.open("rb") as document:
-            response = requests.post(
-                f"{self.base_url}/api/documents/post_document/",
-                headers=self.headers,
-                data=data,
-                files={"document": (file_path.name, document)},
-                timeout=90,
-            )
-        response.raise_for_status()
-        task_id = response.text.strip().strip('"')
-        self.log.publish(f"Paperless-ngx hat {file_path.name} angenommen, Verarbeitung läuft …", "success")
-        return task_id
-
-    def task_state(self, task_id: str) -> dict[str, Any]:
-        """Ask what became of an upload: accepted, duplicate or failed.
-
-        Paperless 3.x renamed these fields, so both spellings are accepted.
-        """
-        response = requests.get(f"{self.base_url}/api/tasks/?task_id={task_id}", headers=self.headers, timeout=20)
-        response.raise_for_status()
-        body = response.json()
-        items = body.get("results", body) if isinstance(body, dict) else body
-        if not items:
-            return {"status": "unknown"}
-        task = items[0]
-        status = str(task.get("status", "")).lower()
-        documents = task.get("related_document_ids") or []
-        single = task.get("related_document")
-        if single and not documents:
-            documents = [single]
-        message = str(task.get("result_data") or task.get("result") or task.get("status_display") or "")
-        return {
-            "status": status,
-            "document_id": documents[0] if documents else None,
-            "message": message,
-            "duplicate": "duplicate" in message.lower() or "bereits" in message.lower(),
-        }
-
-    def collections(self) -> dict[str, list[dict[str, Any]]]:
-        """Tags, correspondents and document types for the pickers."""
-        self._require_config()
-        result: dict[str, list[dict[str, Any]]] = {}
-        for key, endpoint, ordering in (
-            ("tags", "tags", "-document_count"),
-            ("correspondents", "correspondents", "-document_count"),
-            ("document_types", "document_types", "name"),
-        ):
-            response = requests.get(
-                f"{self.base_url}/api/{endpoint}/?page_size=100&ordering={ordering}",
-                headers=self.headers,
-                timeout=20,
-            )
-            response.raise_for_status()
-            body = response.json()
-            items = body.get("results", body) if isinstance(body, dict) else body
-            result[key] = [
-                {"id": item.get("id"), "name": item.get("name"), "count": item.get("document_count", 0)}
-                for item in items
-                if item.get("name")
-            ]
-        return result
-
-    def _require_config(self) -> None:
-        if not self.base_url or not self.config.get("paperless_token"):
-            raise RuntimeError("Paperless-URL oder API-Token fehlt.")
-
-    def _resolve_tags(self) -> list[int]:
-        wanted = self.config["default_tags"]
-        if not wanted:
-            return []
-        response = requests.get(f"{self.base_url}/api/tags/?page_size=100", headers=self.headers, timeout=20)
-        response.raise_for_status()
-        body = response.json()
-        known = body.get("results", body) if isinstance(body, dict) else body
-        by_name = {str(tag.get("name", "")).casefold(): tag.get("id") for tag in known}
-        tag_ids: list[int] = []
-        for tag_name in wanted:
-            tag_id = by_name.get(tag_name.casefold())
-            if tag_id is None and self.config["create_missing_tags"]:
-                created = requests.post(
-                    f"{self.base_url}/api/tags/",
-                    headers={**self.headers, "Content-Type": "application/json"},
-                    json={"name": tag_name, "color": "#c99b52"},
-                    timeout=20,
-                )
-                created.raise_for_status()
-                tag_id = created.json().get("id")
-                self.log.publish(f"Paperless-Tag erstellt: {tag_name}")
-            if tag_id is None:
-                self.log.publish(f"Tag fehlt in Paperless und wurde übersprungen: {tag_name}", "warning")
-            else:
-                tag_ids.append(int(tag_id))
-        return tag_ids
-
+# Settings a single scan may override without being stored.
+SCAN_OVERRIDES = (
+    "source", "resolution", "color_mode", "output_format", "paper_size", "duplex",
+    "upload_to_paperless", "title_prefix", "correspondent", "document_type",
+)
 
 app = Flask(__name__)
 logs = LogHub()
 store = ConfigStore(CONFIG_PATH)
-timings = TimingStore(APP_DATA_DIR / "timings.json")
-jobs = JobStore(APP_DATA_DIR / "jobs.json")
+timings = TimingStore(TIMINGS_PATH)
+jobs = JobStore(JOBS_PATH)
+batch = BatchCollector(BATCH_DIR)
+
 scan_lock = threading.Lock()
 scan_state: dict[str, Any] = {
     "running": False,
@@ -971,11 +87,75 @@ scan_state: dict[str, Any] = {
     "last_error": None,
     "trigger": None,
 }
-preview_cache: dict[str, Any] = {"path": None, "image": None, "mimetype": "image/png"}
-# Pages collected for a multi-document scan; "replace_index" arms the next scan
-# to overwrite one page instead of appending.
-batch_state: dict[str, Any] = {"active": False, "pages": [], "replace_index": None}
-batch_lock = threading.Lock()
+
+
+def _mirror_progress(stage: str, percent: int) -> None:
+    """Keep the polled state in step with the streamed one."""
+    scan_state["stage"] = stage
+    scan_state["progress"] = percent
+
+
+logs.on_progress = _mirror_progress
+
+
+# --------------------------------------------------------------------------- #
+# Optional access protection
+# --------------------------------------------------------------------------- #
+
+login_throttle = auth.LoginThrottle()
+
+
+def session_secret() -> str:
+    """A signing key that survives restarts, so nobody is logged out by a redeploy."""
+    secret = store.get().get("session_secret")
+    if secret:
+        return secret
+    secret = secrets.token_urlsafe(48)
+    try:
+        store.patch(session_secret=secret)
+    except (OSError, ValueError) as error:
+        # A read-only volume or a stored setting that no longer validates must
+        # not stop the service from coming up at all. Sessions then last until
+        # the next restart, and the real problem is reported where it belongs:
+        # the moment someone saves the settings.
+        print(f"ScanDeck: Sitzungsschluessel nicht gespeichert ({error}).", file=sys.stderr, flush=True)
+    return secret
+
+
+app.secret_key = session_secret()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
+
+
+def is_authenticated() -> bool:
+    config = store.get()
+    if not config.get("auth_enabled"):
+        return True
+    # The stamp ties a session to the current password: changing it logs
+    # everyone else out, which is the point of changing it.
+    return session.get("auth") == config.get("auth_password_hash")
+
+
+def sign_in() -> None:
+    session.permanent = True
+    session["auth"] = store.get().get("auth_password_hash")
+
+
+# Routes that bring their own key. Filled by @require_api_key, so a new Home
+# Assistant endpoint is covered without anyone having to remember a list.
+API_KEY_ROUTES: set[str] = set()
+
+
+@app.before_request
+def guard() -> Any:
+    if auth.is_open(request.endpoint) or request.endpoint in API_KEY_ROUTES:
+        return None
+    if is_authenticated():
+        return None
+    return jsonify({"error": "Anmeldung erforderlich.", "auth_required": True}), 401
 
 
 def check_writable(directory: Path, label: str) -> None:
@@ -1003,19 +183,25 @@ check_writable(Path(store.get()["output_dir"]), "Scan-Ablage")
 # --------------------------------------------------------------------------- #
 
 def queue_upload(file_path: Path, config: dict[str, Any], pages: int, tags: list[str]) -> dict[str, Any]:
-    """Record the scan, then try the upload right away."""
+    """Record the scan, then start the upload beside the scan.
+
+    The attempt runs in its own thread so a slow or unreachable Paperless does
+    not keep the scanner blocked for a minute and a half. The job is recorded
+    first, so even if this process dies right here the queue worker picks the
+    upload up again after the restart.
+    """
     status = "pending" if config["upload_to_paperless"] else "local"
     job = jobs.add(file_path, status, pages=pages, tags=tags)
     if status == "pending":
-        attempt_upload(job["id"], config)
-    return jobs.get(job["id"]) or job
+        threading.Thread(target=attempt_upload, args=(job["id"], config), daemon=True).start()
+    return job
 
 
 def attempt_upload(job_id: str, config: dict[str, Any] | None = None) -> bool:
     """One upload attempt. Failures stay in the queue instead of vanishing."""
-    job = jobs.get(job_id)
+    job = jobs.claim(job_id)
     if not job:
-        return False
+        return False  # already gone, or another thread is uploading it
     path = Path(job["path"])
     if not path.exists():
         jobs.update(job_id, status="failed", error="Datei ist nicht mehr vorhanden.")
@@ -1078,7 +264,7 @@ def cleanup_uploaded(config: dict[str, Any]) -> None:
     if not config.get("cleanup_enabled"):
         return
     limit = datetime.now().timestamp() - config["cleanup_hours"] * 3600
-    for job in jobs.list(limit=500):
+    for job in jobs.list(limit=JobStore.MAX_JOBS):
         if job["status"] != "success" or job.get("file_deleted"):
             continue
         stamp = job.get("confirmed_at") or job.get("created")
@@ -1118,119 +304,12 @@ def queue_worker() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Batch scanning: collect single pages, then merge them into one PDF
+# Scan workflow
 # --------------------------------------------------------------------------- #
-
-def batch_public() -> dict[str, Any]:
-    with batch_lock:
-        return {
-            "active": batch_state["active"],
-            "replace_index": batch_state["replace_index"],
-            "pages": [
-                {
-                    "index": index,
-                    "name": page["name"],
-                    "kind": page["kind"],
-                    "rotation": page.get("rotation", 0),
-                }
-                for index, page in enumerate(batch_state["pages"])
-            ],
-        }
-
-
-def batch_clear() -> None:
-    """Drop every collected page and its file."""
-    with batch_lock:
-        for page in batch_state["pages"]:
-            try:
-                Path(page["path"]).unlink(missing_ok=True)
-            except OSError:
-                pass
-        batch_state.update({"active": False, "pages": [], "replace_index": None})
-
-
-def batch_store(source: Path) -> int:
-    """Move a finished scan into the batch, replacing a page when armed."""
-    BATCH_DIR.mkdir(parents=True, exist_ok=True)
-    target = BATCH_DIR / f"page_{int(time.time() * 1000)}{source.suffix.lower()}"
-    target.write_bytes(source.read_bytes())
-    source.unlink(missing_ok=True)
-    entry = {
-        "name": target.name,
-        "path": str(target),
-        "kind": "pdf" if target.suffix.lower() == ".pdf" else "image",
-        "rotation": 0,
-    }
-    with batch_lock:
-        index = batch_state["replace_index"]
-        if index is not None and 0 <= index < len(batch_state["pages"]):
-            previous = batch_state["pages"][index]
-            try:
-                Path(previous["path"]).unlink(missing_ok=True)
-            except OSError:
-                pass
-            batch_state["pages"][index] = entry
-            batch_state["replace_index"] = None
-            return index
-        batch_state["pages"].append(entry)
-        batch_state["replace_index"] = None
-        return len(batch_state["pages"]) - 1
-
-
-def as_pdf_document(path: Path, rotation: int = 0) -> "pypdfium2.PdfDocument":
-    """Every page becomes a PDF so the merge only has to deal with one format."""
-    import pypdfium2
-    from PIL import Image
-
-    rotation = normalise_rotation(rotation)
-    if path.suffix.lower() == ".pdf":
-        document = pypdfium2.PdfDocument(str(path))
-        if rotation:
-            for index in range(len(document)):
-                page = document[index]
-                page.set_rotation((page.get_rotation() + rotation) % 360)
-        return document
-
-    image = Image.open(path).convert("RGB")
-    if rotation:
-        # PIL turns counter-clockwise, the UI promises clockwise.
-        image = image.rotate(-rotation, expand=True)
-    buffer = io.BytesIO()
-    image.save(buffer, "PDF", resolution=200.0)
-    return pypdfium2.PdfDocument(buffer.getvalue())
-
-
-def normalise_rotation(degrees: Any) -> int:
-    try:
-        return int(degrees) % 360 // 90 * 90
-    except (TypeError, ValueError):
-        return 0
-
-
-def merge_batch(pages: list[dict[str, Any]], target: Path) -> int:
-    """Combine the collected pages into a single PDF. Returns the page count."""
-    import pypdfium2
-
-    merged = pypdfium2.PdfDocument.new()
-    sources = []
-    try:
-        for page in pages:
-            document = as_pdf_document(Path(page["path"]), page.get("rotation", 0))
-            sources.append(document)
-            merged.import_pages(document)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        merged.save(str(target))
-        return len(merged)
-    finally:
-        for document in sources:
-            document.close()
-        merged.close()
-
 
 def finish_batch(config: dict[str, Any], session_tags: list[str]) -> Path:
     """Merge, store and (optionally) upload the collected pages as one document."""
-    with batch_lock:
-        pages = list(batch_state["pages"])
+    pages = batch.pages()
     if not pages:
         raise RuntimeError("Der Stapel enthält keine Seiten.")
 
@@ -1238,16 +317,10 @@ def finish_batch(config: dict[str, Any], session_tags: list[str]) -> Path:
     logs.publish(f"Füge {len(pages)} Seite(n) zu einem PDF zusammen …")
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     target = Path(config["output_dir"]) / f"scan_{timestamp}_{len(pages)}-seiten.pdf"
-    page_count = merge_batch(pages, target)
-    logs.publish(f"Dokument erstellt: {target.name} ({page_count} Seiten)", "success")
+    count = batch.merge_into(target)
+    logs.publish(f"Dokument erstellt: {target.name} ({count} Seiten)", "success")
 
-    preview_cache.update({"path": None, "image": None})
-    scan_state.update({
-        "last_file": str(target),
-        "last_name": target.name,
-        "last_kind": "pdf",
-        "last_finished": datetime.now().isoformat(timespec="seconds"),
-    })
+    remember_result(target, "pdf")
 
     upload_config = {**config}
     if session_tags:
@@ -1256,15 +329,21 @@ def finish_batch(config: dict[str, Any], session_tags: list[str]) -> Path:
         logs.progress("upload", 80)
     else:
         logs.publish("Upload nach Paperless-ngx ist deaktiviert.", "warning")
-    queue_upload(target, upload_config, page_count, upload_config["default_tags"])
+    queue_upload(target, upload_config, count, upload_config["default_tags"])
 
-    batch_clear()
+    batch.clear()
     return target
 
 
-# --------------------------------------------------------------------------- #
-# Scan workflow
-# --------------------------------------------------------------------------- #
+def remember_result(target: Path, kind: str) -> None:
+    preview_cache.clear()
+    scan_state.update({
+        "last_file": str(target),
+        "last_name": target.name,
+        "last_kind": kind,
+        "last_finished": datetime.now().isoformat(timespec="seconds"),
+    })
+
 
 def start_scan_job(session_tags: list[str], trigger: str = "ui", overrides: dict[str, Any] | None = None) -> bool:
     """Kick off a scan unless one is already running. Returns False if busy."""
@@ -1277,58 +356,63 @@ def start_scan_job(session_tags: list[str], trigger: str = "ui", overrides: dict
         "progress": 2,
         "trigger": trigger,
     })
-    threading.Thread(
-        target=scan_worker,
-        args=(session_tags, trigger, overrides or {}),
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=scan_worker,
+            args=(session_tags, trigger, overrides or {}),
+            daemon=True,
+        ).start()
+    except RuntimeError:
+        # Without this the lock would stay held and block every later scan.
+        scan_state["running"] = False
+        scan_lock.release()
+        raise
     return True
+
+
+def scan_config(session_tags: list[str], overrides: dict[str, Any]) -> dict[str, Any]:
+    config = store.get()
+    for key in SCAN_OVERRIDES:
+        if key in overrides and overrides[key] not in (None, ""):
+            config[key] = overrides[key]
+    config = validate_config(config)
+    if session_tags:
+        config["default_tags"] = list(dict.fromkeys(config["default_tags"] + session_tags))
+        logs.publish(f"Session-Tags: {', '.join(session_tags)}")
+    return config
 
 
 def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]) -> None:
     try:
-        config = store.get()
-        for key in ("source", "resolution", "color_mode", "output_format", "upload_to_paperless",
-                    "title_prefix", "correspondent", "document_type"):
-            if key in overrides and overrides[key] not in (None, ""):
-                config[key] = overrides[key]
-        config = validate_config(config)
-        if session_tags:
-            config["default_tags"] = list(dict.fromkeys(config["default_tags"] + session_tags))
-            logs.publish(f"Session-Tags: {', '.join(session_tags)}")
+        config = scan_config(session_tags, overrides)
         logs.publish(f"Scan angefordert ({'Home Assistant' if trigger == 'ha' else 'Oberfläche'}).")
         logs.progress("start", 4)
         if config["upload_to_paperless"]:
-            PaperlessClient(config, logs)._require_config()
-        scanner = ScannerClient(config, logs)
-        file_path = scanner.scan()
+            PaperlessClient(config, logs).require_config()
+        sheets = ScannerClient(config, logs, timings).scan()
 
-        if batch_state["active"]:
-            # Collect the page; nothing is uploaded until the batch is closed.
-            replaced = batch_state["replace_index"]
-            index = batch_store(file_path)
-            total = len(batch_state["pages"])
-            action = f"Seite {index + 1} ersetzt" if replaced is not None else f"Seite {total} aufgenommen"
+        if batch.active():
+            # Collect the sheets; nothing is uploaded until the batch is closed.
+            index, total, replaced, added = batch.add(sheets)
+            action = (f"Seite {index + 1} ersetzt" if replaced and added == 1
+                      else f"Seite {index + 1} durch {added} Seiten ersetzt" if replaced
+                      else f"{added} Seiten aufgenommen" if added > 1
+                      else f"Seite {total} aufgenommen")
             logs.publish(f"{action} · {total} Seite(n) im Stapel.", "success")
-            logs.progress("done", 100, batch=True, pages=total, page_index=index)
+            logs.progress("done", 100, batch=True, pages=total, page_index=index, added=added)
             notify_home_assistant(config, "page", f"Seite {index + 1}", None)
             return
 
-        preview_cache.update({"path": None, "image": None})
-        scan_state.update({
-            "last_file": str(file_path),
-            "last_name": file_path.name,
-            "last_kind": "pdf" if file_path.suffix.lower() == ".pdf" else "image",
-            "last_finished": datetime.now().isoformat(timespec="seconds"),
-        })
+        target, count = collect_document(sheets, config)
+        remember_result(target, "pdf" if target.suffix.lower() == ".pdf" else "image")
         if config["upload_to_paperless"]:
             logs.progress("upload", 88)
         else:
             logs.publish("Upload nach Paperless-ngx ist deaktiviert.", "warning")
-        queue_upload(file_path, config, 1, config["default_tags"])
-        logs.progress("done", 100, file=file_path.name)
+        queue_upload(target, config, count, config["default_tags"])
+        logs.progress("done", 100, file=target.name, pages=count)
         logs.publish("Workflow abgeschlossen.", "success")
-        notify_home_assistant(config, "success", file_path.name, None)
+        notify_home_assistant(config, "success", target.name, None)
     except Exception as error:  # surface every device/API failure in the log stream
         scan_state["last_error"] = str(error)
         logs.progress("error", 100, error=str(error))
@@ -1337,6 +421,20 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
     finally:
         scan_state["running"] = False
         scan_lock.release()
+
+
+def collect_document(sheets: list[Path], config: dict[str, Any]) -> tuple[Path, int]:
+    """One scan run becomes one document, however many sheets it took."""
+    if len(sheets) == 1:
+        return sheets[0], page_count(sheets[0])
+
+    logs.progress("merge", 84)
+    logs.publish(f"Füge {len(sheets)} Blatt zu einem PDF zusammen …")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    target = Path(config["output_dir"]) / f"scan_{timestamp}_{len(sheets)}-seiten.pdf"
+    count = merge_files(sheets, target)
+    logs.publish(f"Dokument erstellt: {target.name} ({count} Seiten)", "success")
+    return target, count
 
 
 def notify_home_assistant(config: dict[str, Any], status: str, filename: str | None, error: str | None) -> None:
@@ -1365,53 +463,88 @@ def notify_home_assistant(config: dict[str, Any], status: str, filename: str | N
     threading.Thread(target=send, daemon=True).start()
 
 
-# --------------------------------------------------------------------------- #
-# Preview rendering
-# --------------------------------------------------------------------------- #
-
-def render_preview(file_path: Path, rotation: int = 0) -> tuple[bytes, str]:
-    """Return displayable image bytes for a scan (first page for PDFs)."""
-    rotation = normalise_rotation(rotation)
-    cache_key = (str(file_path), rotation)
-    if preview_cache["path"] == cache_key and preview_cache["image"]:
-        return preview_cache["image"], preview_cache["mimetype"]
-
-    if file_path.suffix.lower() != ".pdf":
-        if not rotation:
-            payload = file_path.read_bytes()
-            preview_cache.update({"path": cache_key, "image": payload, "mimetype": "image/jpeg"})
-            return payload, "image/jpeg"
-        from PIL import Image
-
-        buffer = io.BytesIO()
-        Image.open(file_path).convert("RGB").rotate(-rotation, expand=True).save(buffer, "JPEG", quality=88)
-        payload = buffer.getvalue()
-        preview_cache.update({"path": cache_key, "image": payload, "mimetype": "image/jpeg"})
-        return payload, "image/jpeg"
-
+def batch_finish_worker(session_tags: list[str], metadata: dict[str, Any] | None = None) -> None:
     try:
-        import pypdfium2  # optional: only needed to rasterise PDF previews
+        config = validate_config(store.get())
+        config.update(metadata or {})
+        target = finish_batch(config, session_tags)
+        logs.progress("done", 100, file=target.name)
+        logs.publish("Stapel abgeschlossen.", "success")
+        notify_home_assistant(config, "success", target.name, None)
+    except Exception as error:
+        scan_state["last_error"] = str(error)
+        logs.progress("error", 100, error=str(error))
+        logs.publish(f"Stapel fehlgeschlagen: {error}", "error")
+        notify_home_assistant(store.get(), "error", None, str(error))
+    finally:
+        scan_state["running"] = False
+        scan_lock.release()
 
-        pdf = pypdfium2.PdfDocument(str(file_path))
-        try:
-            page = pdf[0]
-            if rotation:
-                page.set_rotation((page.get_rotation() + rotation) % 360)
-            bitmap = page.render(scale=1.4)
-            buffer = io.BytesIO()
-            bitmap.to_pil().save(buffer, format="PNG", optimize=True)
-        finally:
-            pdf.close()
-        payload = buffer.getvalue()
-        preview_cache.update({"path": cache_key, "image": payload, "mimetype": "image/png"})
-        return payload, "image/png"
-    except Exception as error:  # missing wheel or broken PDF: fall back to the file
-        logs.publish(f"PDF-Vorschau nicht gerendert ({error}); zeige Originaldatei.", "warning")
+
+def start_batch_finish(
+    session_tags: list[str], metadata: dict[str, Any], trigger: str
+) -> tuple[str, int] | None:
+    """Close the batch in the background. Returns (message, status) on refusal.
+
+    Shared by the interface and Home Assistant so both take the same lock and
+    cannot merge the same pages twice.
+    """
+    if not batch.count():
+        return "Der Stapel enthält keine Seiten.", 400
+    if not scan_lock.acquire(blocking=False):
+        return "Ein Scan läuft gerade.", 409
+    scan_state.update({"running": True, "last_error": None, "stage": "merge",
+                       "progress": 10, "trigger": trigger})
+    try:
+        threading.Thread(target=batch_finish_worker, args=(session_tags, metadata), daemon=True).start()
+    except RuntimeError:
+        scan_state["running"] = False
+        scan_lock.release()
         raise
+    return None
 
 
 # --------------------------------------------------------------------------- #
-# Routes
+# Response helpers
+# --------------------------------------------------------------------------- #
+
+def preview_response(path: Path, rotation: int = 0) -> Response:
+    """Rasterised page, or the untouched file when rendering is not possible."""
+    try:
+        payload, mimetype = render_preview(path, rotation)
+    except Exception as error:  # missing wheel or broken PDF: fall back to the file
+        logs.publish(f"Vorschau nicht gerendert ({error}); zeige Originaldatei.", "warning")
+        return send_file(path, mimetype="application/pdf", max_age=0)
+    return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+
+
+def scan_file_response(path: Path) -> Response:
+    mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "image/jpeg"
+    return send_file(path, mimetype=mimetype, as_attachment=False, download_name=path.name, max_age=0)
+
+
+def storage_error(error: OSError, target: Path) -> tuple[Response, int]:
+    """Turn a bare PermissionError into something a user can act on."""
+    message = (
+        f"{target} ist nicht beschreibbar ({error.strerror or error}). "
+        "Der Ordner gehoert vermutlich einem anderen Benutzer als dem Dienst — "
+        "Container neu starten oder PUID/PGID passend zum Host setzen."
+    )
+    logs.publish(message, "error")
+    return jsonify({"error": message}), 500
+
+
+def parse_session_tags(raw: Any) -> list[str]:
+    """Tags for this one scan: a list, or a comma separated string from HA."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(str(tag).strip() for tag in raw if str(tag).strip()))
+
+
+# --------------------------------------------------------------------------- #
+# Routes: shell and settings
 # --------------------------------------------------------------------------- #
 
 @app.get("/")
@@ -1443,24 +576,17 @@ def get_config() -> Response:
     config["suggested_subnet"] = config.get("discovery_subnet") or guess_local_subnet()
     config["version"] = APP_VERSION
     config["releases_url"] = RELEASES_URL
+    config["paper_sizes"] = list(PAPER_SIZES)
     return jsonify(config)
-
-
-def storage_error(error: OSError, target: Path) -> tuple[Response, int]:
-    """Turn a bare PermissionError into something a user can act on."""
-    message = (
-        f"{target} ist nicht beschreibbar ({error.strerror or error}). "
-        "Der Ordner gehoert vermutlich einem anderen Benutzer als dem Dienst — "
-        "Container neu starten oder PUID/PGID passend zum Host setzen."
-    )
-    logs.publish(message, "error")
-    return jsonify({"error": message}), 500
 
 
 @app.put("/api/config")
 def put_config() -> Response:
     try:
         config = store.save(request.get_json(force=True) or {})
+        # A freshly chosen folder is created and probed now, so a wrong path is
+        # reported here instead of failing halfway through the next scan.
+        check_writable(Path(config["output_dir"]), "Scan-Ablage")
         logs.publish("Einstellungen gespeichert.", "success")
         return jsonify(config)
     except (TypeError, ValueError) as error:
@@ -1488,12 +614,11 @@ def complete_setup() -> Response:
 def reset_setup() -> Response:
     """Wipe the stored configuration and restart the wizard."""
     try:
-        CONFIG_PATH.unlink(missing_ok=True)
+        public_config = store.reset()
     except OSError as error:
         return jsonify({"error": str(error)}), 500
-    store._config = DEFAULT_CONFIG.copy()
     logs.publish("Konfiguration zurückgesetzt.", "warning")
-    return jsonify(store.public())
+    return jsonify(public_config)
 
 
 @app.get("/api/state")
@@ -1501,15 +626,19 @@ def state() -> Response:
     return jsonify({
         **scan_state,
         "setup_complete": store.get()["setup_complete"],
-        "batch": batch_public(),
+        "batch": batch.public(),
         "queue": jobs.pending_count(),
     })
 
 
+# --------------------------------------------------------------------------- #
+# Routes: devices
+# --------------------------------------------------------------------------- #
+
 @app.post("/api/test/scanner")
 def test_scanner() -> Response:
     try:
-        result = ScannerClient(store.get(), logs).capabilities()
+        result = ScannerClient(store.get(), logs, timings).capabilities()
         return jsonify({"ok": True, **result})
     except (requests.RequestException, ET.ParseError, RuntimeError) as error:
         logs.publish(f"Scanner-Test fehlgeschlagen: {error}", "error")
@@ -1553,12 +682,31 @@ def discovery_candidates() -> Response:
     return jsonify({"candidates": candidate_subnets(store.get(), request.remote_addr)[:4]})
 
 
+@app.post("/api/scanner/prewarm")
+def prewarm() -> Response:
+    """Nudge the scanner awake while the user is still choosing settings."""
+    config = store.get()
+    if not config.get("prewarm_enabled") or not config.get("scanner_url") or scan_state["running"]:
+        return jsonify({"ok": False, "skipped": True})
+
+    def wake() -> None:
+        try:
+            ScannerClient(config, logs, timings).status()
+        except Exception:
+            pass  # a sleeping or missing scanner must not produce noise
+
+    threading.Thread(target=wake, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
+# Routes: scanning
+# --------------------------------------------------------------------------- #
+
 @app.post("/api/scan")
 def start_scan() -> Response:
     payload = request.get_json(silent=True) or {}
-    session_tags = list(dict.fromkeys(
-        str(tag).strip() for tag in payload.get("session_tags", []) if str(tag).strip()
-    ))
+    session_tags = parse_session_tags(payload.get("session_tags"))
     if not start_scan_job(session_tags, "ui", payload.get("overrides")):
         return jsonify({"error": "Ein Scan läuft bereits."}), 409
     return jsonify({"ok": True, "message": "Scan wurde gestartet."}), 202
@@ -1566,139 +714,88 @@ def start_scan() -> Response:
 
 @app.get("/api/batch")
 def get_batch() -> Response:
-    return jsonify(batch_public())
+    return jsonify(batch.public())
 
 
 @app.post("/api/batch/start")
 def start_batch() -> Response:
-    batch_clear()
-    with batch_lock:
-        batch_state["active"] = True
+    public_batch = batch.begin()
     logs.publish("Stapel gestartet — Seiten werden gesammelt.", "success")
-    return jsonify(batch_public())
+    return jsonify(public_batch)
 
 
 @app.post("/api/batch/cancel")
 def cancel_batch() -> Response:
-    pages = len(batch_state["pages"])
-    batch_clear()
+    pages = batch.count()
+    batch.clear()
     logs.publish(f"Stapel verworfen ({pages} Seite(n)).", "warning")
-    return jsonify(batch_public())
+    return jsonify(batch.public())
 
 
 @app.post("/api/batch/replace")
 def arm_replace() -> Response:
     """Arm the next scan to overwrite one page instead of appending."""
-    payload = request.get_json(silent=True) or {}
-    index = payload.get("index")
-    with batch_lock:
-        if index is None:
-            batch_state["replace_index"] = None
-        elif not isinstance(index, int) or not 0 <= index < len(batch_state["pages"]):
-            return jsonify({"error": "Diese Seite gibt es nicht."}), 400
-        else:
-            batch_state["replace_index"] = index
+    index = (request.get_json(silent=True) or {}).get("index")
+    if not batch.arm(index):
+        return jsonify({"error": "Diese Seite gibt es nicht."}), 400
     if index is not None:
         logs.publish(f"Nächster Scan ersetzt Seite {int(index) + 1}.")
-    return jsonify(batch_public())
+    return jsonify(batch.public())
 
 
 @app.delete("/api/batch/page/<int:index>")
 def delete_batch_page(index: int) -> Response:
-    with batch_lock:
-        if not 0 <= index < len(batch_state["pages"]):
-            return jsonify({"error": "Diese Seite gibt es nicht."}), 404
-        page = batch_state["pages"].pop(index)
-        if batch_state["replace_index"] is not None:
-            batch_state["replace_index"] = None
-    try:
-        Path(page["path"]).unlink(missing_ok=True)
-    except OSError:
-        pass
+    if not batch.remove(index):
+        return jsonify({"error": "Diese Seite gibt es nicht."}), 404
     logs.publish(f"Seite {index + 1} aus dem Stapel entfernt.")
-    return jsonify(batch_public())
+    return jsonify(batch.public())
 
 
 @app.get("/api/batch/page/<int:index>/preview")
 def batch_page_preview(index: int) -> Response:
-    with batch_lock:
-        if not 0 <= index < len(batch_state["pages"]):
-            return jsonify({"error": "Diese Seite gibt es nicht."}), 404
-        page = batch_state["pages"][index]
+    page = batch.page(index)
+    if not page:
+        return jsonify({"error": "Diese Seite gibt es nicht."}), 404
     path = Path(page["path"])
     if not path.exists():
         return jsonify({"error": "Seite nicht mehr vorhanden."}), 404
-    try:
-        payload, mimetype = render_preview(path, page.get("rotation", 0))
-    except Exception:
-        return send_file(path, mimetype="application/pdf", max_age=0)
-    return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+    return preview_response(path, page.get("rotation", 0))
 
 
 @app.post("/api/batch/page/<int:index>/rotate")
 def rotate_batch_page(index: int) -> Response:
     """Turn a single page; the rotation is applied when the batch is merged."""
     degrees = normalise_rotation((request.get_json(silent=True) or {}).get("degrees", 90)) or 90
-    with batch_lock:
-        if not 0 <= index < len(batch_state["pages"]):
-            return jsonify({"error": "Diese Seite gibt es nicht."}), 404
-        page = batch_state["pages"][index]
-        page["rotation"] = (page.get("rotation", 0) + degrees) % 360
-    return jsonify(batch_public())
+    if not batch.rotate(index, degrees):
+        return jsonify({"error": "Diese Seite gibt es nicht."}), 404
+    return jsonify(batch.public())
 
 
 @app.post("/api/batch/order")
 def reorder_batch() -> Response:
     """Apply a new page order, e.g. after dragging a page to another slot."""
     order = (request.get_json(silent=True) or {}).get("order")
-    with batch_lock:
-        pages = batch_state["pages"]
-        if not isinstance(order, list) or sorted(order) != list(range(len(pages))):
-            return jsonify({"error": "Die Reihenfolge passt nicht zum Stapel."}), 400
-        armed = batch_state["replace_index"]
-        batch_state["pages"] = [pages[position] for position in order]
-        if armed is not None:
-            # Keep the armed page armed, even though it sits somewhere else now.
-            batch_state["replace_index"] = order.index(armed) if armed in order else None
+    if not batch.reorder(order):
+        return jsonify({"error": "Die Reihenfolge passt nicht zum Stapel."}), 400
     logs.publish("Reihenfolge im Stapel geändert.")
-    return jsonify(batch_public())
+    return jsonify(batch.public())
 
 
 @app.post("/api/batch/finish")
 def close_batch() -> Response:
-    if not batch_state["pages"]:
-        return jsonify({"error": "Der Stapel enthält keine Seiten."}), 400
-    if not scan_lock.acquire(blocking=False):
-        return jsonify({"error": "Ein Scan läuft gerade."}), 409
-
     payload = request.get_json(silent=True) or {}
-    session_tags = list(dict.fromkeys(
-        str(tag).strip() for tag in payload.get("session_tags", []) if str(tag).strip()
-    ))
     metadata = {key: payload[key] for key in ("correspondent", "document_type")
                 if payload.get(key) not in (None, "")}
-    scan_state.update({"running": True, "last_error": None, "stage": "merge", "progress": 10, "trigger": "batch"})
-    threading.Thread(target=batch_finish_worker, args=(session_tags, metadata), daemon=True).start()
+    refused = start_batch_finish(parse_session_tags(payload.get("session_tags")), metadata, "batch")
+    if refused:
+        message, status = refused
+        return jsonify({"error": message}), status
     return jsonify({"ok": True}), 202
 
 
-def batch_finish_worker(session_tags: list[str], metadata: dict[str, Any] | None = None) -> None:
-    try:
-        config = validate_config(store.get())
-        config.update(metadata or {})
-        target = finish_batch(config, session_tags)
-        logs.progress("done", 100, file=target.name)
-        logs.publish("Stapel abgeschlossen.", "success")
-        notify_home_assistant(config, "success", target.name, None)
-    except Exception as error:
-        scan_state["last_error"] = str(error)
-        logs.progress("error", 100, error=str(error))
-        logs.publish(f"Stapel fehlgeschlagen: {error}", "error")
-        notify_home_assistant(store.get(), "error", None, str(error))
-    finally:
-        scan_state["running"] = False
-        scan_lock.release()
-
+# --------------------------------------------------------------------------- #
+# Routes: results
+# --------------------------------------------------------------------------- #
 
 @app.get("/api/preview")
 def preview() -> Response:
@@ -1706,12 +803,7 @@ def preview() -> Response:
     last_file = scan_state.get("last_file")
     if not last_file or not Path(last_file).exists():
         return jsonify({"error": "Keine Vorschau verfügbar."}), 404
-    path = Path(last_file)
-    try:
-        payload, mimetype = render_preview(path)
-    except Exception:
-        return send_file(path, mimetype="application/pdf", max_age=0)
-    return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+    return preview_response(Path(last_file))
 
 
 @app.get("/api/preview/file")
@@ -1719,9 +811,7 @@ def preview_file() -> Response:
     last_file = scan_state.get("last_file")
     if not last_file or not Path(last_file).exists():
         return jsonify({"error": "Keine Datei verfügbar."}), 404
-    path = Path(last_file)
-    mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "image/jpeg"
-    return send_file(path, mimetype=mimetype, as_attachment=False, download_name=path.name, max_age=0)
+    return scan_file_response(Path(last_file))
 
 
 @app.get("/api/history")
@@ -1729,7 +819,7 @@ def get_history() -> Response:
     limit = max(1, min(200, int(request.args.get("limit", 40))))
     entries = jobs.list(limit)
     for entry in entries:
-        entry["exists"] = (not entry["file_deleted"]) and Path(entry["path"]).exists()
+        entry["exists"] = (not entry.get("file_deleted")) and Path(entry["path"]).exists()
         entry.pop("path", None)
     return jsonify({"jobs": entries, "open": jobs.pending_count()})
 
@@ -1742,11 +832,7 @@ def history_preview(job_id: str) -> Response:
     path = Path(job["path"])
     if not path.exists():
         return jsonify({"error": "Datei wurde bereits aufgeräumt."}), 404
-    try:
-        payload, mimetype = render_preview(path)
-    except Exception:
-        return send_file(path, mimetype="application/pdf", max_age=0)
-    return Response(payload, mimetype=mimetype, headers={"Cache-Control": "no-store"})
+    return preview_response(path)
 
 
 @app.get("/api/history/<job_id>/file")
@@ -1754,9 +840,7 @@ def history_file(job_id: str) -> Response:
     job = jobs.get(job_id)
     if not job or not Path(job["path"]).exists():
         return jsonify({"error": "Datei wurde bereits aufgeräumt."}), 404
-    path = Path(job["path"])
-    mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "image/jpeg"
-    return send_file(path, mimetype=mimetype, download_name=path.name, max_age=0)
+    return scan_file_response(Path(job["path"]))
 
 
 @app.post("/api/history/<job_id>/retry")
@@ -1774,13 +858,16 @@ def history_retry(job_id: str) -> Response:
 
 @app.delete("/api/history/<job_id>")
 def history_delete(job_id: str) -> Response:
-    job = jobs.remove(job_id)
+    job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Unbekannter Eintrag."}), 404
+    # Remove the file first: dropping the entry on a failed unlink would leave
+    # a scan on disk that nothing in the interface can reach any more.
     try:
         Path(job["path"]).unlink(missing_ok=True)
     except OSError as error:
         return jsonify({"error": str(error)}), 500
+    jobs.remove(job_id)
     logs.publish(f"{job['name']} aus dem Verlauf gelöscht.")
     return jsonify({"ok": True})
 
@@ -1794,27 +881,20 @@ def paperless_collections() -> Response:
         return jsonify({"ok": False, "error": str(error)}), 502
 
 
-@app.post("/api/scanner/prewarm")
-def prewarm() -> Response:
-    """Nudge the scanner awake while the user is still choosing settings."""
-    config = store.get()
-    if not config.get("prewarm_enabled") or not config.get("scanner_url") or scan_state["running"]:
-        return jsonify({"ok": False, "skipped": True})
-
-    def wake() -> None:
-        try:
-            ScannerClient(config, logs).status()
-        except Exception:
-            pass  # a sleeping or missing scanner must not produce noise
-
-    threading.Thread(target=wake, daemon=True).start()
-    return jsonify({"ok": True})
-
+# --------------------------------------------------------------------------- #
+# Routes: stream, update, health
+# --------------------------------------------------------------------------- #
 
 @app.get("/api/logs")
 def stream_logs() -> Response:
+    try:
+        stream = logs.stream()
+    except TooManySubscribers:
+        # Better an honest refusal than a request that hangs forever because
+        # every worker thread is parked on a stream.
+        return jsonify({"error": "Zu viele offene Verbindungen."}), 503
     return Response(
-        stream_with_context(logs.stream()),
+        stream_with_context(stream),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -1840,10 +920,105 @@ def health() -> Response:
 
 
 # --------------------------------------------------------------------------- #
+# Routes: access protection
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/auth/state")
+def auth_state() -> Response:
+    return jsonify(auth.public_state(store.get(), is_authenticated()))
+
+
+@app.post("/api/auth/login")
+def auth_login() -> Response:
+    config = store.get()
+    if not config.get("auth_enabled"):
+        return jsonify({"ok": True, **auth.public_state(config, True)})
+
+    blocked = login_throttle.blocked_seconds()
+    if blocked:
+        return jsonify({
+            "ok": False,
+            "error": f"Zu viele Fehlversuche. Bitte {blocked // 60 + 1} Minuten warten.",
+            "retry_after": blocked,
+        }), 429
+
+    password = str((request.get_json(silent=True) or {}).get("password", ""))
+    if not auth.verify_password(config.get("auth_password_hash", ""), password):
+        login_throttle.record_failure()
+        logs.publish("Anmeldung mit falschem Passwort abgelehnt.", "warning")
+        return jsonify({"ok": False, "error": "Passwort stimmt nicht."}), 401
+
+    login_throttle.reset()
+    sign_in()
+    return jsonify({"ok": True, **auth.public_state(config, True)})
+
+
+@app.post("/api/auth/logout")
+def auth_logout() -> Response:
+    session.pop("auth", None)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auth/enable")
+def auth_enable() -> Response:
+    """Turn protection on and log this browser in, so nobody locks themselves out."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        password = auth.check_password_rules(payload.get("password", ""))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    try:
+        store.patch(auth_password_hash=auth.hash_password(password), auth_enabled=True)
+    except OSError as error:
+        return storage_error(error, CONFIG_PATH)
+    sign_in()
+    logs.publish("Zugriffsschutz eingeschaltet.", "success")
+    return jsonify({"ok": True, **auth.public_state(store.get(), True)})
+
+
+@app.post("/api/auth/password")
+def auth_change_password() -> Response:
+    """Change the password. Only reachable with a valid session."""
+    payload = request.get_json(silent=True) or {}
+    config = store.get()
+    if config.get("auth_enabled") and not auth.verify_password(
+        config.get("auth_password_hash", ""), str(payload.get("current", ""))
+    ):
+        return jsonify({"ok": False, "error": "Bisheriges Passwort stimmt nicht."}), 401
+    try:
+        password = auth.check_password_rules(payload.get("password", ""))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    try:
+        store.patch(auth_password_hash=auth.hash_password(password), auth_enabled=True)
+    except OSError as error:
+        return storage_error(error, CONFIG_PATH)
+    sign_in()  # every other browser is signed out by the changed password
+    logs.publish("Passwort für den Zugriffsschutz geändert.", "success")
+    return jsonify({"ok": True, **auth.public_state(store.get(), True)})
+
+
+@app.post("/api/auth/disable")
+def auth_disable() -> Response:
+    try:
+        store.patch(auth_enabled=False, auth_password_hash="")
+    except OSError as error:
+        return storage_error(error, CONFIG_PATH)
+    session.pop("auth", None)
+    login_throttle.reset()
+    logs.publish("Zugriffsschutz ausgeschaltet.", "warning")
+    return jsonify({"ok": True, **auth.public_state(store.get(), True)})
+
+
+# --------------------------------------------------------------------------- #
 # Home Assistant integration
 # --------------------------------------------------------------------------- #
 
 def require_api_key(view: Callable[..., Any]) -> Callable[..., Any]:
+    # An automation authenticates with its key, not with a browser session, so
+    # switching the interface protection on must not break it.
+    API_KEY_ROUTES.add(view.__name__)
+
     @wraps(view)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         config = store.get()
@@ -1881,16 +1056,8 @@ def read_ha_key() -> Response:
 def ha_scan() -> Response:
     """Trigger endpoint for HA automations (motion sensor, button, script, …)."""
     payload = request.get_json(silent=True) or {}
-    tags = payload.get("tags") or payload.get("session_tags") or []
-    if isinstance(tags, str):
-        tags = [part.strip() for part in tags.split(",")]
-    session_tags = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
-    overrides = {
-        key: payload[key]
-        for key in ("source", "resolution", "color_mode", "output_format", "upload_to_paperless",
-                    "title_prefix", "correspondent", "document_type")
-        if key in payload
-    }
+    session_tags = parse_session_tags(payload.get("tags") or payload.get("session_tags"))
+    overrides = {key: payload[key] for key in SCAN_OVERRIDES if key in payload}
     if not start_scan_job(session_tags, "ha", overrides):
         return jsonify({"ok": False, "error": "Ein Scan läuft bereits."}), 409
     return jsonify({"ok": True, "message": "Scan gestartet."}), 202
@@ -1910,8 +1077,9 @@ def ha_state() -> Response:
         "last_finished": scan_state["last_finished"],
         "last_error": scan_state["last_error"],
         "trigger": scan_state["trigger"],
-        "batch_active": batch_state["active"],
-        "batch_pages": len(batch_state["pages"]),
+        "batch_active": batch.active(),
+        "batch_pages": batch.count(),
+        "queue": jobs.pending_count(),
         "version": APP_VERSION,
         "scanner_url": config["scanner_url"],
         "upload_to_paperless": config["upload_to_paperless"],
@@ -1924,22 +1092,18 @@ def ha_batch() -> Response:
     """Let an automation open, close or discard a batch (e.g. two buttons)."""
     action = str((request.get_json(silent=True) or {}).get("action", "")).lower()
     if action == "start":
-        batch_clear()
-        with batch_lock:
-            batch_state["active"] = True
+        public_batch = batch.begin()
         logs.publish("Stapel über Home Assistant gestartet.", "success")
-        return jsonify({"ok": True, **batch_public()})
+        return jsonify({"ok": True, **public_batch})
     if action == "cancel":
-        batch_clear()
+        batch.clear()
         logs.publish("Stapel über Home Assistant verworfen.", "warning")
-        return jsonify({"ok": True, **batch_public()})
+        return jsonify({"ok": True, **batch.public()})
     if action == "finish":
-        if not batch_state["pages"]:
-            return jsonify({"ok": False, "error": "Der Stapel enthält keine Seiten."}), 400
-        if not scan_lock.acquire(blocking=False):
-            return jsonify({"ok": False, "error": "Ein Scan läuft gerade."}), 409
-        scan_state.update({"running": True, "last_error": None, "stage": "merge", "progress": 10, "trigger": "ha"})
-        threading.Thread(target=batch_finish_worker, args=([], {}), daemon=True).start()
+        refused = start_batch_finish([], {}, "ha")
+        if refused:
+            message, status = refused
+            return jsonify({"ok": False, "error": message}), status
         return jsonify({"ok": True, "message": "Stapel wird abgeschlossen."}), 202
     return jsonify({"ok": False, "error": "action muss start, finish oder cancel sein."}), 400
 

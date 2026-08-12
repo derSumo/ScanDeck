@@ -1,0 +1,3 @@
+# Nur fuer die Tests; das Container-Image braucht davon nichts.
+-r requirements.txt
+pytest==9.1.1
