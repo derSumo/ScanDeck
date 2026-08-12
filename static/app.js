@@ -52,6 +52,7 @@ const state = {
   queue: 0,
   auth: { enabled: false, authenticated: true },
   capabilities: { known: false },
+  push: { enabled: false },
   pageIndex: 0,
   eta: null,
   etaAt: 0,
@@ -538,6 +539,16 @@ function applyConfig(config) {
   setValue("metadata-enabled", config.metadata_enabled);
   setValue("quick-tags-enabled", config.quick_tags_enabled);
   setValue("prewarm-enabled", config.prewarm_enabled);
+  setValue("sound-enabled", config.sound_enabled);
+  setValue("skip-blank-pages", config.skip_blank_pages);
+  setValue("deskew-enabled", config.deskew_enabled);
+  setValue("mqtt-enabled", config.mqtt_enabled);
+  setValue("mqtt-host", config.mqtt_host);
+  setValue("mqtt-port", config.mqtt_port ?? 1883);
+  setValue("mqtt-user", config.mqtt_user);
+  setValue("mqtt-password", "");
+  setValue("mqtt-device-name", config.mqtt_device_name);
+  renderProfiles();
   setValue("cleanup-enabled", config.cleanup_enabled);
   setValue("cleanup-hours", config.cleanup_hours ?? 24);
   $("#metadata-card").hidden = !config.metadata_enabled;
@@ -563,6 +574,7 @@ function renderFoldStates(config) {
   const marks = [
     ["#paperless-state", config.upload_to_paperless, config.upload_to_paperless ? "aktiv" : "aus"],
     ["#ha-state", config.ha_enabled, config.ha_enabled ? "aktiv" : "aus"],
+    ["#mqtt-state", config.mqtt_enabled, config.mqtt_enabled ? "aktiv" : "aus"],
   ];
   marks.forEach(([selector, on, text]) => {
     const chip = $(selector);
@@ -602,6 +614,15 @@ function collectConfig() {
     metadata_enabled: getValue("metadata-enabled"),
     quick_tags_enabled: getValue("quick-tags-enabled"),
     prewarm_enabled: getValue("prewarm-enabled"),
+    sound_enabled: getValue("sound-enabled"),
+    skip_blank_pages: getValue("skip-blank-pages"),
+    deskew_enabled: getValue("deskew-enabled"),
+    mqtt_enabled: getValue("mqtt-enabled"),
+    mqtt_host: getValue("mqtt-host"),
+    mqtt_port: Number(getValue("mqtt-port") || 1883),
+    mqtt_user: getValue("mqtt-user"),
+    mqtt_password: (getValue("mqtt-password") || "").trim(),
+    mqtt_device_name: getValue("mqtt-device-name"),
     cleanup_enabled: getValue("cleanup-enabled"),
     cleanup_hours: Number(getValue("cleanup-hours") || 24),
   };
@@ -1394,6 +1415,7 @@ function handleProgress(event) {
         loadBatch().catch(() => {});
         loadHistory().catch(() => {});
       }
+      signalDone("success");
       refreshState().catch(() => {});
     }, 620);
   }
@@ -1418,6 +1440,7 @@ function handleProgress(event) {
       hideProgress();
       setScanning(false);
       setStatus("Fehler", "error");
+      signalDone("error");
       toast(event.error || "Scan fehlgeschlagen", "error");
     }, 900);
   }
@@ -1906,6 +1929,236 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closePreview();
 });
 
+/* --- Profile -------------------------------------------------------------- */
+
+function renderProfiles() {
+  const profiles = state.config.profiles || [];
+  const row = $("#profile-row");
+  row.hidden = profiles.length === 0;
+  row.replaceChildren(
+    ...profiles.map((profile) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "profile-chip";
+      button.textContent = profile.name;
+      button.title = profileSummary(profile);
+      button.addEventListener("click", () => startProfile(profile));
+      return button;
+    })
+  );
+  renderProfileEditor();
+}
+
+function profileSummary(profile) {
+  const parts = [
+    LABELS.source[profile.source] || profile.source,
+    profile.resolution ? `${profile.resolution} dpi` : null,
+    LABELS.color_mode[profile.color_mode] || profile.color_mode,
+    (profile.tags || []).length ? `Tags: ${profile.tags.join(", ")}` : null,
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+async function startProfile(profile) {
+  if (state.running) return;
+  try {
+    await api(`/api/profiles/${encodeURIComponent(profile.id)}/scan`, { method: "POST" });
+    state.progressTitle = profile.name;
+    setScanning(true);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function renderProfileEditor() {
+  const editor = $("#profile-editor");
+  if (!editor) return;
+  const profiles = state.config.profiles || [];
+  editor.replaceChildren(
+    ...profiles.map((profile, index) => {
+      const box = document.createElement("div");
+      box.className = "profile-edit";
+
+      const name = document.createElement("input");
+      name.type = "text";
+      name.value = profile.name;
+      name.placeholder = "Name";
+      name.addEventListener("change", () => saveProfiles(
+        profiles.map((entry, position) => (position === index ? { ...entry, name: name.value } : entry))
+      ));
+
+      const summary = document.createElement("span");
+      summary.className = "profile-summary";
+      summary.textContent = profileSummary(profile);
+
+      const adopt = document.createElement("button");
+      adopt.type = "button";
+      adopt.className = "btn tiny ghost";
+      adopt.textContent = "Aktuelle Einstellungen übernehmen";
+      adopt.addEventListener("click", () => saveProfiles(
+        profiles.map((entry, position) =>
+          (position === index ? { ...entry, ...currentScanSettings() } : entry))
+      ));
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "btn tiny ghost danger";
+      remove.textContent = "Löschen";
+      remove.addEventListener("click", () => saveProfiles(profiles.filter((_, position) => position !== index)));
+
+      box.append(name, summary, adopt, remove);
+      return box;
+    })
+  );
+}
+
+// Ein neues Profil uebernimmt, was gerade eingestellt ist - das ist fast immer
+// gemeint, wenn jemand "so wie jetzt, aber gemerkt" moechte.
+function currentScanSettings() {
+  return {
+    source: state.config.source,
+    resolution: Number(state.config.resolution),
+    color_mode: state.config.color_mode,
+    output_format: state.config.output_format,
+    paper_size: state.config.paper_size,
+    duplex: Boolean(state.config.duplex),
+    tags: [...state.sessionTags],
+  };
+}
+
+async function saveProfiles(profiles) {
+  try {
+    const body = await api("/api/profiles", { method: "PUT", body: JSON.stringify({ profiles }) });
+    state.config.profiles = body.profiles;
+    renderProfiles();
+    toast("Profile gespeichert", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+$("#profile-add").addEventListener("click", () => {
+  const profiles = state.config.profiles || [];
+  const name = (prompt("Name des Profils?", `Profil ${profiles.length + 1}`) || "").trim();
+  if (!name) return;
+  saveProfiles([...profiles, { name, ...currentScanSettings() }]);
+});
+
+/* --- Benachrichtigungen aufs Handy --------------------------------------- */
+
+function urlBase64ToUint8Array(base64) {
+  const padded = (base64 + "=".repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+}
+
+async function renderPushState() {
+  const info = await api("/api/push/key").catch(() => null);
+  const chip = $("#push-state");
+  const disable = $("#push-disable");
+  if (!info) return;
+  state.push = info;
+  chip.textContent = info.enabled ? "aktiv" : "aus";
+  chip.classList.toggle("on", Boolean(info.enabled));
+  disable.hidden = !info.enabled;
+  $("#push-info").textContent = info.enabled
+    ? `${info.devices || 0} Gerät(e) angemeldet.`
+    : "Noch nicht eingerichtet.";
+}
+
+$("#push-enable").addEventListener("click", async () => {
+  const button = $("#push-enable");
+  button.disabled = true;
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      throw new Error("Dieser Browser kann keine Benachrichtigungen empfangen.");
+    }
+    if ((await Notification.requestPermission()) !== "granted") {
+      throw new Error("Ohne Erlaubnis geht es nicht — im Browser für diese Seite freigeben.");
+    }
+    const { public_key: publicKey } = await api("/api/push/enable", { method: "POST" });
+    const registration = await navigator.serviceWorker.ready;
+    const existing = await registration.pushManager.getSubscription();
+    if (existing) await existing.unsubscribe();
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+    await api("/api/push/subscribe", { method: "POST", body: JSON.stringify(subscription.toJSON()) });
+    await renderPushState();
+    toast("Benachrichtigungen aktiv", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#push-test").addEventListener("click", async () => {
+  try {
+    await api("/api/push/test", { method: "POST" });
+    toast("Testmeldung verschickt", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
+
+$("#push-disable").addEventListener("click", async () => {
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.getSubscription();
+    if (subscription) await subscription.unsubscribe();
+  } catch {
+    /* lokale Abmeldung ist Kür; der Server vergisst ohnehin alle */
+  }
+  await api("/api/push/disable", { method: "POST" }).catch(() => {});
+  await renderPushState();
+  toast("Benachrichtigungen abgeschaltet", "success");
+});
+
+$("#mqtt-test").addEventListener("click", async () => {
+  const button = $("#mqtt-test");
+  button.disabled = true;
+  button.textContent = "Verbinde …";
+  try {
+    await api("/api/mqtt/test", { method: "POST", body: JSON.stringify(collectConfig()) });
+    setValue("mqtt-password", "");
+    toast("MQTT verbunden — Home Assistant legt die Geräte an", "success");
+    applyConfig(await api("/api/config"));
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Verbinden und testen";
+  }
+});
+
+/* --- Ton und Vibration ---------------------------------------------------- */
+
+// Man legt das Telefon weg, waehrend der Scanner arbeitet - ein kurzes Signal
+// erspart das Nachsehen.
+function signalDone(kind = "success") {
+  if (!state.config.sound_enabled) return;
+  if (navigator.vibrate) navigator.vibrate(kind === "error" ? [120, 60, 120] : [60, 40, 90]);
+  try {
+    const context = new (window.AudioContext || window.webkitAudioContext)();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.type = "sine";
+    // Zwei kurze Toene nach oben bei Erfolg, einer nach unten bei Fehler.
+    oscillator.frequency.setValueAtTime(kind === "error" ? 420 : 660, context.currentTime);
+    oscillator.frequency.setValueAtTime(kind === "error" ? 300 : 880, context.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.14, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.32);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.34);
+    setTimeout(() => context.close().catch(() => {}), 600);
+  } catch {
+    /* ohne Audio-Erlaubnis bleibt die Vibration */
+  }
+}
+
 /* --- Seitenlupe ----------------------------------------------------------- */
 
 function openPage(index) {
@@ -2112,6 +2365,7 @@ async function boot() {
   checkForUpdate().catch(() => {});
   loadCollections().catch(() => {});
   loadCapabilities().catch(() => {});
+  renderPushState().catch(() => {});
   prewarmScanner();
 
   if (!started) {

@@ -29,6 +29,38 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+/* Push: erreicht die installierte App auch, wenn sie geschlossen ist. */
+self.addEventListener("push", (event) => {
+  let payload = { title: "ScanDeck", body: "Scan fertig.", tag: "scandeck" };
+  try {
+    if (event.data) payload = { ...payload, ...event.data.json() };
+  } catch {
+    /* Text statt JSON: dann bleibt die Vorgabe stehen */
+  }
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      tag: payload.tag,
+      icon: "/static/icons/icon-192.png",
+      badge: "/static/icons/icon-192.png",
+      vibrate: [80, 40, 80],
+      renotify: true,
+    })
+  );
+});
+
+/* Tippen auf die Meldung bringt die App nach vorn, statt sie neu zu oeffnen. */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const open = clients.find((client) => "focus" in client);
+      if (open) return open.focus();
+      return self.clients.openWindow("/");
+    })
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;

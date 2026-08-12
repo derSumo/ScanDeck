@@ -122,6 +122,29 @@ Unter *Einstellungen → Was dein Scanner kann* steht, was das Gerät gemeldet h
 
 ScanDeck fragt das auch selbst ab und bietet nur an, was geht: Ein Vorlagenglas, das bei A4 endet, zeigt Legal durchgestrichen; ein Einzug, der bei 300 dpi aufhört, sperrt 600 und 1200; ohne beidseitigen Einzug fehlt der Duplex-Schalter. Kommt eine Einstellung trotzdem einmal nicht durch — etwa aus einer älteren Konfiguration —, wird sie auf das machbare Maß gebracht und die Anpassung im Protokoll genannt, statt den Scan mit einem nackten „HTTP 409“ abzubrechen.
 
+### Profile
+
+Wer immer wieder dasselbe scannt, legt sich dafür ein Profil an: *Einstellungen → Profile → Hinzufügen* übernimmt, was gerade eingestellt ist — Quelle, Auflösung, Farbe, Format, Papierformat und die Tags. Auf der Startseite steht das Profil dann als Knopf über dem Scan-Knopf; ein Tipp darauf scannt sofort mit diesen Werten.
+
+Home Assistant kann ein Profil ebenfalls beim Namen nennen:
+
+```yaml
+rest_command:
+  scandeck_rechnung:
+    url: "http://scandeck:8080/api/ha/scan"
+    method: POST
+    headers: { X-API-Key: !secret scandeck_key }
+    payload: '{"profile": "rechnung"}'
+    content_type: "application/json"
+```
+
+### Nachbearbeitung
+
+Zwei Schalter unter *Einstellungen → Nachbearbeitung*, beide bewusst aus:
+
+- **Leere Seiten überspringen** — beim beidseitigen Einzug sind die Rückseiten meist unbedruckt. Gemessen wird der Tintenanteil ohne die äußeren vier Prozent, damit Staub und der Schatten des Deckels nicht als Inhalt zählen. Eine Seite mit einer einzigen Zeile gilt nie als leer. Jede übersprungene Seite steht im Protokoll.
+- **Schiefe Seiten geraderücken** — richtet schief eingezogene Blätter auf, was die Texterkennung in Paperless spürbar verbessert. Die Seite wird dafür neu aufgebaut; unter 0,4° Abweichung passiert nichts.
+
 ### Verlauf und Warteschlange
 
 Der Reiter **Verlauf** zeigt jeden Scan mit Vorschaubild und dem, was daraus geworden ist. ScanDeck bleibt nämlich dran, bis Paperless-ngx bestätigt hat:
@@ -155,7 +178,26 @@ Damit das Dashboard schlank bleibt, sind Zusatzfunktionen unter *Einstellungen �
 - Standardformat ist **PDF**.
 - *Konfiguration löschen* setzt alles zurück und startet den Assistenten erneut.
 
+## Benachrichtigungen aufs Handy
+
+Unter *Einstellungen → Benachrichtigungen* lässt sich Web Push einschalten. Danach meldet sich das Telefon, sobald Paperless das Dokument angelegt hat — auch wenn die App geschlossen ist. Voraussetzung ist eine Erreichbarkeit über **HTTPS** (auf dem iPhone zusätzlich: die App muss auf dem Startbildschirm liegen). Die Schlüssel erzeugt ScanDeck beim Einschalten selbst und legt sie nur lokal ab.
+
+Wer es leiser mag: Unter *Extras* gibt es **Ton und Vibration**, wenn ein Scan fertig ist. Das braucht kein HTTPS und keine Erlaubnis.
+
 ## Home Assistant
+
+### Der bequeme Weg: MQTT
+
+Steht ein MQTT-Broker bereit (etwa das Mosquitto-Add-on), reicht *Einstellungen → Home Assistant über MQTT*: Adresse eintragen, verbinden — fertig. ScanDeck erscheint in Home Assistant als eigenes Gerät, ohne einen einzigen Eintrag in `configuration.yaml`:
+
+| Knöpfe | Sensoren |
+| --- | --- |
+| Scan starten, Scan abbrechen | Status, Fortschritt, Warteschlange |
+| Stapel starten, ablegen, verwerfen | Letzter Scan, Einzug, Scannt, Stapel offen |
+
+Damit lässt sich ein Scan per Automatisierung auslösen, der Fortschritt auf einem Dashboard anzeigen und etwa eine Meldung schicken, wenn die Warteschlange nicht leerläuft.
+
+### Der klassische Weg: REST
 
 Unter *Einstellungen → Home Assistant* die Schnittstelle aktivieren; dabei wird lokal ein API-Key erzeugt. Die passende YAML-Konfiguration steht dort zum Kopieren bereit.
 

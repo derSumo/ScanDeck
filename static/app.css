@@ -1357,3 +1357,39 @@ body.is-locked { overflow: hidden; }
     transition-duration: 0.08s !important;
   }
 }
+
+/* Profile ----------------------------------------------------------------- */
+.profile-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: -2px; }
+.profile-chip {
+  border: 1px solid rgba(255, 176, 60, 0.32);
+  background: rgba(255, 176, 60, 0.09);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 8px 15px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.profile-chip:hover { background: rgba(255, 176, 60, 0.16); }
+.profile-chip:active { transform: scale(0.97); }
+.profile-editor { display: grid; gap: 10px; }
+.profile-edit {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.profile-edit input {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 4px 0;
+}
+.profile-summary { grid-column: 1 / -1; font-size: 12px; color: var(--text-faint); }
+.field.narrow { max-width: 110px; }

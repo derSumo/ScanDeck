@@ -13,6 +13,21 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-08-13
+
+### Hinzugefügt
+
+- **Leere Seiten überspringen** (opt-in). Beim beidseitigen Einzug sind die Rückseiten meist unbedruckt und landeten trotzdem im PDF. Erkannt wird eine Seite über den Tintenanteil, gemessen ohne die äußeren vier Prozent — Scannerstaub und der Schatten des Deckels zählen also nicht als Inhalt. Eine Seite mit einer einzigen Textzeile gilt nie als leer, und jede übersprungene Seite steht im Protokoll. Sind am Ende alle Seiten leer, wird kein leeres Dokument abgelegt, sondern das gemeldet.
+- **Schiefe Seiten geraderücken** (opt-in). Schief eingezogene Blätter kosten Paperless Erkennungsgenauigkeit. Der Winkel wird über das klassische Projektionsprofil bestimmt (in Tests auf 0,1° genau) und die Seite entsprechend gedreht. Unter 0,4° passiert nichts, damit keine Seite ohne Nutzen neu aufgebaut wird.
+- **Profile**: Ein Tipp statt vier Schalter. Ein Profil merkt sich Quelle, Auflösung, Farbe, Format, Papier und Tags und erscheint als Knopf über dem Scan-Knopf. Neue Profile übernehmen, was gerade eingestellt ist. Profile werden nach denselben Regeln geprüft wie die Einstellungen, können also keinen Wert enthalten, an dem ein Scan scheitert. Home Assistant kann ein Profil beim Namen nennen: `{"profile": "rechnung"}`.
+- **Home Assistant über MQTT**: ScanDeck erscheint von selbst als Gerät — fünf Knöpfe (Scan, Abbrechen, Stapel starten/ablegen/verwerfen) und sieben Sensoren (Status, Fortschritt, Warteschlange, letzter Scan, Einzug, Scannt, Stapel offen). Nichts in `configuration.yaml` einzutragen. Gegen einen echten Broker geprüft: zwölf Entitäten werden angekündigt, und die Knöpfe steuern die App wirklich.
+- **Benachrichtigungen aufs Handy** (opt-in) über Web Push: meldet sich, wenn Paperless das Dokument angelegt hat — auch bei geschlossener App. Die Schlüssel werden beim Einschalten einmalig erzeugt; abgemeldete Geräte fallen von selbst aus der Liste.
+- **Ton und Vibration**, wenn ein Scan fertig ist (opt-in). Zwei kurze Töne bei Erfolg, ein tiefer bei einem Fehler — man legt das Telefon ja weg.
+
+### Behoben
+
+- **Das MQTT-Broker-Passwort und der private Push-Schlüssel wurden über `/api/config` ausgeliefert.** Beide sind jetzt gesperrt, und zwar an einer einzigen Stelle für alle Geheimnisse, damit das beim nächsten hinzukommenden nicht wieder passieren kann. Die Oberfläche erfährt weiterhin, *ob* etwas gesetzt ist, nicht *was*.
+
 ## [1.9.0] - 2026-08-12
 
 ### Behoben
@@ -114,7 +129,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
 - Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
 - Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
-- Testsuite (175 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+- Testsuite (215 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
 
 ## [1.5.0] - 2026-08-11
 
@@ -220,7 +235,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/derSumo/ScanDeck/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/derSumo/ScanDeck/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/derSumo/ScanDeck/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/derSumo/ScanDeck/compare/v1.6.2...v1.7.0

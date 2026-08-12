@@ -201,6 +201,7 @@
           <button class="quick" data-quick="color_mode" type="button"><span>Farbe</span><b id="quick-color">Farbe</b></button>
         </div>
         <p id="feeder-state" class="feeder-chip" hidden role="status"></p>
+        <div id="profile-row" class="profile-row" role="group" aria-label="Profile" hidden></div>
 
         <section id="metadata-card" class="card" hidden>
           <div class="card-head"><h2>Ablage in Paperless</h2><button id="metadata-reload" class="btn tiny ghost" type="button">Neu laden</button></div>
@@ -327,11 +328,69 @@
         </section>
 
         <section class="card">
+          <div class="card-head"><h2>Nachbearbeitung</h2></div>
+          <label class="switch"><input id="skip-blank-pages" type="checkbox"><i></i><span>Leere Seiten überspringen</span></label>
+          <p class="hint">Beim beidseitigen Einzug sind die Rückseiten meist unbedruckt. Erkannt wird eine Seite als leer, wenn fast nichts darauf steht; im Protokoll wird jede übersprungene Seite genannt.</p>
+          <label class="switch"><input id="deskew-enabled" type="checkbox"><i></i><span>Schiefe Seiten geraderücken</span></label>
+          <p class="hint">Richtet schief eingezogene Blätter auf. Die Seite wird dafür neu aufgebaut — das kostet einen Moment, verbessert aber die Texterkennung in Paperless spürbar.</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>Profile</h2><button id="profile-add" class="btn tiny ghost" type="button">Hinzufügen</button></div>
+          <p class="hint">Ein Tipp statt vier Schalter: Ein Profil merkt sich Quelle, Auflösung, Farbe, Format und Tags. Auf der Startseite erscheint es als Knopf über dem Scan-Knopf.</p>
+          <div id="profile-editor" class="profile-editor"></div>
+        </section>
+
+        <section class="card">
           <div class="card-head"><h2>Extras</h2></div>
           <label class="switch"><input id="metadata-enabled" type="checkbox"><i></i><span>Korrespondent und Dokumenttyp beim Scannen wählen</span></label>
           <label class="switch"><input id="quick-tags-enabled" type="checkbox"><i></i><span>Schnell-Tags aus Paperless anbieten</span></label>
           <label class="switch"><input id="prewarm-enabled" type="checkbox"><i></i><span>Scanner beim Öffnen der App aufwecken</span></label>
+          <label class="switch"><input id="sound-enabled" type="checkbox"><i></i><span>Ton und Vibration, wenn ein Scan fertig ist</span></label>
           <p class="hint">Zusatzfunktionen bleiben aus, damit das Dashboard schlank bleibt.</p>
+        </section>
+
+        <section class="card">
+          <details class="fold" id="fold-notify">
+            <summary>
+              <span class="fold-title">Benachrichtigungen aufs Handy</span>
+              <span class="fold-state" id="push-state">aus</span>
+              <span class="chev" aria-hidden="true"></span>
+            </summary>
+            <div class="fold-body">
+              <p class="hint">Meldet sich, wenn Paperless ein Dokument angelegt hat — auch wenn die App geschlossen ist. Dafür muss ScanDeck über HTTPS erreichbar sein und auf dem iPhone als App auf dem Startbildschirm liegen.</p>
+              <div class="row-buttons">
+                <button id="push-enable" class="btn primary" type="button">Auf diesem Gerät aktivieren</button>
+                <button id="push-test" class="btn ghost" type="button">Testmeldung</button>
+              </div>
+              <button id="push-disable" class="btn ghost danger wide" type="button" hidden>Für alle Geräte abschalten</button>
+              <p class="hint" id="push-info"></p>
+            </div>
+          </details>
+        </section>
+
+        <section class="card">
+          <details class="fold" id="fold-mqtt">
+            <summary>
+              <span class="fold-title">Home Assistant über MQTT</span>
+              <span class="fold-state" id="mqtt-state">aus</span>
+              <span class="chev" aria-hidden="true"></span>
+            </summary>
+            <div class="fold-body">
+              <p class="hint">Der bequeme Weg: ScanDeck erscheint in Home Assistant von selbst als Gerät — mit Knöpfen für Scan, Abbrechen und Stapel sowie Sensoren für Status, Fortschritt, Warteschlange und Einzug. Nichts in <code>configuration.yaml</code> einzutragen.</p>
+              <label class="switch"><input id="mqtt-enabled" type="checkbox"><i></i><span>MQTT verwenden</span></label>
+              <div class="field-row">
+                <label class="field"><span>Broker</span><input id="mqtt-host" type="text" spellcheck="false" placeholder="192.168.1.10"></label>
+                <label class="field narrow"><span>Port</span><input id="mqtt-port" type="number" min="1" max="65535" inputmode="numeric" placeholder="1883"></label>
+              </div>
+              <div class="field-row">
+                <label class="field"><span>Benutzer</span><input id="mqtt-user" type="text" spellcheck="false" autocomplete="off" placeholder="optional"></label>
+                <label class="field"><span>Passwort</span><input id="mqtt-password" type="password" autocomplete="off" placeholder="unverändert lassen"></label>
+              </div>
+              <label class="field"><span>Gerätename in Home Assistant</span><input id="mqtt-device-name" type="text" placeholder="ScanDeck"></label>
+              <button id="mqtt-test" class="btn ghost wide" type="button">Verbinden und testen</button>
+            </div>
+          </details>
         </section>
 
         <section class="card">

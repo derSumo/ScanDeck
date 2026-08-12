@@ -5,3 +5,7 @@ urllib3==2.6.3
 # Rasterises the first PDF page for the post-scan preview.
 pypdfium2==5.12.1
 pillow==12.3.0
+# Home Assistant per MQTT: die Geraete legt HA dann selbst an.
+paho-mqtt==2.1.0
+# Benachrichtigungen aufs Handy, auch wenn die App geschlossen ist.
+pywebpush==2.4.0

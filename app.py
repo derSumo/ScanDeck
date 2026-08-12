@@ -43,6 +43,8 @@ from scandeck.config import (
     validate_config,
 )
 from scandeck.documents import (
+    looks_blank,
+    straighten,
     merge_files,
     normalise_rotation,
     page_count,
@@ -60,6 +62,7 @@ from scandeck.escl import (
 )
 from scandeck.events import LogHub, TooManySubscribers
 from scandeck.jobs import JobStore, TimingStore
+from scandeck.mqtt import MqttBridge
 from scandeck.network import (
     autodiscover_scanners,
     candidate_subnets,
@@ -67,6 +70,7 @@ from scandeck.network import (
     guess_local_subnet,
 )
 from scandeck.paperless import PaperlessClient
+from scandeck.push import PushService, generate_keys
 from scandeck.updates import check_for_update
 from scandeck.version import APP_VERSION, RELEASES_URL
 
@@ -94,6 +98,7 @@ scan_state: dict[str, Any] = {
     "last_finished": None,
     "last_error": None,
     "trigger": None,
+    "feeder": "",
 }
 
 
@@ -121,9 +126,62 @@ def _mirror_progress(stage: str, percent: int) -> None:
     """Keep the polled state in step with the streamed one."""
     scan_state["stage"] = stage
     scan_state["progress"] = percent
+    publish_mqtt_state()
 
 
 logs.on_progress = _mirror_progress
+
+
+# --------------------------------------------------------------------------- #
+# Home Assistant over MQTT and notifications on the phone
+# --------------------------------------------------------------------------- #
+
+def run_mqtt_command(command: str) -> None:
+    """A button in Home Assistant was pressed."""
+    if command == "scan":
+        start_scan_job([], "mqtt", {})
+    elif command == "cancel":
+        cancel_active_scan()
+    elif command == "batch_start":
+        batch.begin()
+        logs.publish("Stapel über Home Assistant gestartet.", "success")
+    elif command == "batch_finish":
+        start_batch_finish([], {}, "mqtt")
+    elif command == "batch_cancel":
+        batch.clear()
+        logs.publish("Stapel über Home Assistant verworfen.", "warning")
+    elif command.startswith("profile:"):
+        profile_scan(command.split(":", 1)[1], "mqtt")
+    else:
+        logs.publish(f"Unbekannter MQTT-Befehl: {command}", "warning")
+
+
+mqtt_bridge = MqttBridge(logs, run_mqtt_command)
+push_service = PushService(
+    logs,
+    load=lambda: store.get(),
+    save_subscriptions=lambda entries: store.patch(push_subscriptions=entries),
+)
+
+
+def mqtt_snapshot() -> dict[str, Any]:
+    return {
+        "state": "scanning" if scan_state["running"] else ("error" if scan_state["last_error"] else "idle"),
+        "running": scan_state["running"],
+        "stage": scan_state["stage"],
+        "progress": scan_state["progress"],
+        "last_file": scan_state["last_name"] or "—",
+        "last_finished": scan_state["last_finished"],
+        "queue": jobs.pending_count(),
+        "batch_active": batch.active(),
+        "batch_pages": batch.count(),
+        "feeder": ADF_LABELS.get(scan_state.get("feeder", ""), "unbekannt"),
+    }
+
+
+def publish_mqtt_state() -> None:
+    if mqtt_bridge.connected:
+        mqtt_bridge.publish_state(mqtt_snapshot())
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +260,8 @@ def check_writable(directory: Path, label: str) -> None:
         print(f"ScanDeck: {message}", file=sys.stderr, flush=True)
 
 
+mqtt_bridge.apply(store.get())
+
 check_writable(APP_DATA_DIR, "Konfigurationsverzeichnis")
 check_writable(Path(store.get()["output_dir"]), "Scan-Ablage")
 
@@ -272,6 +332,9 @@ def follow_up_task(job: dict[str, Any], config: dict[str, Any]) -> None:
         )
         document = f" als Dokument #{state['document_id']}" if state["document_id"] else ""
         logs.publish(f"Paperless hat {job['name']}{document} angelegt.", "success")
+        # Das ist der Moment, auf den man wartet, waehrend das Telefon daneben liegt.
+        push_service.notify("Scan abgelegt", f"{job['name']} liegt in Paperless{document}.")
+        publish_mqtt_state()
         return
 
     duplicate = state["duplicate"]
@@ -285,6 +348,11 @@ def follow_up_task(job: dict[str, Any], config: dict[str, Any]) -> None:
         f"Paperless hat {job['name']} " + ("als Duplikat abgelehnt." if duplicate else f"abgelehnt: {state['message']}"),
         "warning" if duplicate else "error",
     )
+    push_service.notify(
+        "Duplikat" if duplicate else "Upload abgelehnt",
+        f"{job['name']}: " + ("Paperless kennt das Dokument bereits." if duplicate else state["message"]),
+    )
+    publish_mqtt_state()
 
 
 def cleanup_uploaded(config: dict[str, Any]) -> None:
@@ -420,6 +488,9 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
         scanner = ScannerClient(config, logs, timings)
         set_active_scan(scanner)
         sheets = scanner.scan()
+        if config.get("skip_blank_pages") or config.get("deskew_enabled"):
+            logs.progress("tidy", 80)
+        sheets = tidy_sheets(sheets, config)
 
         if batch.active():
             # Collect the sheets; nothing is uploaded until the batch is closed.
@@ -443,6 +514,8 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
         logs.progress("done", 100, file=target.name, pages=count)
         logs.publish("Workflow abgeschlossen.", "success")
         notify_home_assistant(config, "success", target.name, None)
+        if not config["upload_to_paperless"]:
+            push_service.notify("Scan fertig", f"{target.name} liegt im Ablageordner.")
     except ScanCancelled:
         # Stopping on purpose is not a failure, so it is not reported as one.
         scan_state["last_error"] = None
@@ -457,6 +530,34 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
         set_active_scan(None)
         scan_state["running"] = False
         scan_lock.release()
+
+
+def tidy_sheets(sheets: list[Path], config: dict[str, Any]) -> list[Path]:
+    """Drop blank backs and straighten crooked pages, if asked to.
+
+    Both are off by default: one throws pages away, the other rewrites them.
+    Neither should happen to someone who did not choose it.
+    """
+    if not config.get("skip_blank_pages") and not config.get("deskew_enabled"):
+        return sheets
+
+    kept: list[Path] = []
+    for sheet in sheets:
+        if config.get("skip_blank_pages") and looks_blank(sheet):
+            logs.publish(f"{sheet.name} ist leer und wird übersprungen.")
+            sheet.unlink(missing_ok=True)
+            continue
+        if config.get("deskew_enabled"):
+            angle = straighten(sheet, int(config.get("resolution", 300)))
+            if angle:
+                logs.publish(f"{sheet.name} war {angle:+.1f}° schief und wurde geradegerückt.")
+        kept.append(sheet)
+
+    if not kept:
+        # Every sheet blank is a real outcome, not a failure — but the run has
+        # produced nothing, so say so instead of writing an empty document.
+        raise RuntimeError("Alle Seiten waren leer. Es wurde nichts abgelegt.")
+    return kept
 
 
 def collect_document(sheets: list[Path], config: dict[str, Any]) -> tuple[Path, int]:
@@ -623,6 +724,7 @@ def put_config() -> Response:
         # A freshly chosen folder is created and probed now, so a wrong path is
         # reported here instead of failing halfway through the next scan.
         check_writable(Path(config["output_dir"]), "Scan-Ablage")
+        mqtt_bridge.apply(store.get())
         logs.publish("Einstellungen gespeichert.", "success")
         return jsonify(config)
     except (TypeError, ValueError) as error:
@@ -798,6 +900,85 @@ def discovery_candidates() -> Response:
     return jsonify({"candidates": candidate_subnets(store.get(), request.remote_addr)[:4]})
 
 
+@app.post("/api/mqtt/test")
+def mqtt_test() -> Response:
+    """Apply the settings and report whether the broker accepted us."""
+    try:
+        config = store.save(request.get_json(silent=True) or {})
+    except (TypeError, ValueError) as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    mqtt_bridge.apply(store.get())
+    for _ in range(20):  # give the connection a couple of seconds
+        if mqtt_bridge.connected:
+            publish_mqtt_state()
+            return jsonify({"ok": True, "connected": True})
+        time.sleep(0.25)
+    if not config.get("mqtt_enabled"):
+        return jsonify({"ok": True, "connected": False, "disabled": True})
+    return jsonify({"ok": False, "error": "Keine Verbindung zum Broker."}), 502
+
+
+@app.get("/api/push/key")
+def push_key() -> Response:
+    """The public key a browser needs in order to subscribe."""
+    config = store.get()
+    if not config.get("push_public_key"):
+        return jsonify({"enabled": bool(config.get("push_enabled")), "public_key": ""})
+    return jsonify({
+        "enabled": bool(config.get("push_enabled")),
+        "public_key": config["push_public_key"],
+        "devices": len(config.get("push_subscriptions") or []),
+    })
+
+
+@app.post("/api/push/enable")
+def push_enable() -> Response:
+    """Switch notifications on, generating the key pair on first use."""
+    config = store.get()
+    try:
+        if not config.get("push_private_key"):
+            public_key, private_key = generate_keys()
+            store.patch(push_public_key=public_key, push_private_key=private_key, push_enabled=True)
+        else:
+            store.patch(push_enabled=True)
+    except OSError as error:
+        return storage_error(error, CONFIG_PATH)
+    except Exception as error:
+        return jsonify({"ok": False, "error": f"Schlüssel konnten nicht erzeugt werden: {error}"}), 500
+    return jsonify({"ok": True, "public_key": store.get()["push_public_key"]})
+
+
+@app.post("/api/push/disable")
+def push_disable() -> Response:
+    store.patch(push_enabled=False, push_subscriptions=[])
+    logs.publish("Benachrichtigungen abgeschaltet.", "warning")
+    return jsonify({"ok": True})
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe() -> Response:
+    try:
+        count = push_service.subscribe(request.get_json(force=True) or {})
+    except (TypeError, ValueError) as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "devices": count})
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe() -> Response:
+    endpoint = str((request.get_json(silent=True) or {}).get("endpoint", ""))
+    return jsonify({"ok": True, "devices": push_service.unsubscribe(endpoint)})
+
+
+@app.post("/api/push/test")
+def push_test() -> Response:
+    config = store.get()
+    if not config.get("push_enabled") or not (config.get("push_subscriptions") or []):
+        return jsonify({"ok": False, "error": "Noch kein Gerät angemeldet."}), 400
+    push_service.notify("ScanDeck", "Benachrichtigungen funktionieren.", tag="test")
+    return jsonify({"ok": True})
+
+
 @app.get("/api/scanner/tray")
 def scanner_tray() -> Response:
     """Just the sheet feeder state — small enough to ask again and again.
@@ -812,6 +993,8 @@ def scanner_tray() -> Response:
         state_now = ScannerClient(config, logs, timings).full_status()
     except (requests.RequestException, ET.ParseError, RuntimeError):
         return jsonify({"ok": False, "adf_state": ""})
+    scan_state["feeder"] = state_now["adf"]
+    publish_mqtt_state()
     return jsonify({
         "ok": True,
         "adf_state": state_now["adf"],
@@ -840,6 +1023,47 @@ def prewarm() -> Response:
 # --------------------------------------------------------------------------- #
 # Routes: scanning
 # --------------------------------------------------------------------------- #
+
+def profile_by_id(profile_id: str) -> dict[str, Any] | None:
+    return next((entry for entry in store.get().get("profiles", [])
+                 if entry["id"] == profile_id), None)
+
+
+def profile_scan(profile_id: str, trigger: str) -> tuple[Response, int]:
+    """Start a scan the way a saved profile describes it."""
+    profile = profile_by_id(profile_id)
+    if not profile:
+        return jsonify({"ok": False, "error": "Unbekanntes Profil."}), 404
+    overrides = {key: profile[key] for key in SCAN_OVERRIDES if key in profile}
+    logs.publish(f"Profil „{profile['name']}“ gestartet.")
+    if not start_scan_job(profile.get("tags", []), trigger, overrides):
+        return jsonify({"ok": False, "error": "Ein Scan läuft bereits."}), 409
+    return jsonify({"ok": True, "profile": profile["name"]}), 202
+
+
+@app.get("/api/profiles")
+def get_profiles() -> Response:
+    return jsonify({"profiles": store.get().get("profiles", [])})
+
+
+@app.put("/api/profiles")
+def put_profiles() -> Response:
+    """Replace the whole list — the editor always sends the complete set."""
+    try:
+        payload = request.get_json(force=True) or {}
+        config = store.patch(profiles=payload.get("profiles", []))
+        logs.publish("Profile gespeichert.", "success")
+        return jsonify({"profiles": config.get("profiles", [])})
+    except (TypeError, ValueError) as error:
+        return jsonify({"error": str(error)}), 400
+    except OSError as error:
+        return storage_error(error, CONFIG_PATH)
+
+
+@app.post("/api/profiles/<profile_id>/scan")
+def scan_with_profile(profile_id: str) -> Response:
+    return profile_scan(profile_id, "profile")
+
 
 @app.post("/api/scan")
 def start_scan() -> Response:
@@ -1220,6 +1444,9 @@ def read_ha_key() -> Response:
 def ha_scan() -> Response:
     """Trigger endpoint for HA automations (motion sensor, button, script, …)."""
     payload = request.get_json(silent=True) or {}
+    # An automation can name a profile instead of repeating every setting.
+    if payload.get("profile"):
+        return profile_scan(str(payload["profile"]), "ha")
     session_tags = parse_session_tags(payload.get("tags") or payload.get("session_tags"))
     overrides = {key: payload[key] for key in SCAN_OVERRIDES if key in payload}
     if not start_scan_job(session_tags, "ha", overrides):

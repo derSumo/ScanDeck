@@ -80,6 +80,144 @@ def split_pages(path: Path, target_dir: Path) -> list[Path]:
     return written
 
 
+# --------------------------------------------------------------------------- #
+# Looking at what was actually scanned
+# --------------------------------------------------------------------------- #
+
+# A scan is never pure white: dust, paper texture and the lid's shadow all leave
+# marks. So "blank" means "almost nothing but background", not "nothing".
+BLANK_INK_SHARE = 0.004  # 0.4 % of the inspected pixels
+BLANK_DARK_LEVEL = 205   # below this counts as ink, on a 0-255 grey scale
+EDGE_MARGIN = 0.04       # ignore the outer 4 %: scanner edges are rarely clean
+
+
+def _grey_preview(path: Path, rotation: int = 0, width: int = 700) -> Any:
+    """A small greyscale copy — enough to judge a page, cheap to work with."""
+    from PIL import Image
+
+    if is_pdf(path):
+        import pypdfium2
+
+        pdf = pypdfium2.PdfDocument(str(path))
+        try:
+            page = pdf[0]
+            if rotation:
+                page.set_rotation((page.get_rotation() + normalise_rotation(rotation)) % 360)
+            scale = min(2.0, max(0.3, width / max(1.0, page.get_size()[0])))
+            image = page.render(scale=scale, grayscale=True).to_pil()
+        finally:
+            pdf.close()
+    else:
+        image = Image.open(path)
+        if rotation:
+            image = image.rotate(-normalise_rotation(rotation), expand=True)
+    return image.convert("L")
+
+
+def ink_share(path: Path, rotation: int = 0) -> float:
+    """How much of the page carries ink, between 0 and 1."""
+    image = _grey_preview(path, rotation)
+    width, height = image.size
+    margin_x, margin_y = int(width * EDGE_MARGIN), int(height * EDGE_MARGIN)
+    inner = image.crop((margin_x, margin_y, width - margin_x, height - margin_y))
+    histogram = inner.histogram()
+    total = sum(histogram) or 1
+    return sum(histogram[:BLANK_DARK_LEVEL]) / total
+
+
+def looks_blank(path: Path, rotation: int = 0) -> bool:
+    """Is this the back of a sheet nobody printed on?
+
+    Duplex and feeder runs produce these by the dozen; keeping them means a
+    ten page document where five pages say nothing.
+    """
+    try:
+        return ink_share(path, rotation) < BLANK_INK_SHARE
+    except Exception:
+        return False  # unreadable is not the same as empty
+
+
+def find_skew(path: Path, limit: float = 6.0, step: float = 0.25) -> float:
+    """The angle this page is rotated by, in degrees, or 0.0 if it looks straight.
+
+    Uses the classic projection profile: rotate a small copy through a range of
+    angles and keep the one where the rows differ most from one another. Text
+    lines line up exactly at that angle, which makes the row sums spiky.
+    """
+    try:
+        image = _grey_preview(path, width=800)
+    except Exception:
+        return 0.0
+    from PIL import Image
+
+    # Work on ink-as-white so empty rows really are zero.
+    binary = image.point(lambda value: 255 if value < BLANK_DARK_LEVEL else 0)
+    if not sum(binary.histogram()[1:]):
+        return 0.0  # nothing on the page to align
+
+    def sharpness(angle: float) -> float:
+        turned = binary if angle == 0 else binary.rotate(angle, resample=Image.BILINEAR, fillcolor=0)
+        # Squeezing the page to a single column averages every row in one go —
+        # summing row by row in Python would mean millions of pixel reads.
+        rows = turned.resize((1, turned.height), Image.BILINEAR).tobytes()
+        if not rows:
+            return 0.0
+        mean = sum(rows) / len(rows)
+        return sum((value - mean) ** 2 for value in rows)
+
+    # Coarse pass first, then refine around the winner: the fine pass alone
+    # would mean hundreds of rotations of the whole image.
+    coarse = max((a / 2 for a in range(int(-limit * 2), int(limit * 2) + 1)), key=sharpness)
+    fine_range = [coarse + offset * step for offset in range(-2, 3)]
+    best = max(fine_range, key=sharpness)
+    return 0.0 if abs(best) < step else round(best, 2)
+
+
+# Below this the correction is not worth re-encoding the page for.
+MIN_SKEW = 0.4
+
+
+def straighten(path: Path, dpi: int = 300) -> float:
+    """Rotate a crooked page upright in place. Returns the angle applied.
+
+    A PDF page has to be rasterised and rebuilt for this — its content cannot be
+    turned by a fraction of a degree otherwise. That is acceptable here because
+    these pages are photographs of paper anyway, with no text layer to lose;
+    Paperless does the text recognition afterwards, and it reads straight lines
+    considerably better.
+    """
+    angle = find_skew(path)
+    if abs(angle) < MIN_SKEW:
+        return 0.0
+
+    from PIL import Image
+
+    try:
+        if is_pdf(path):
+            import pypdfium2
+
+            pdf = pypdfium2.PdfDocument(str(path))
+            try:
+                scale = max(1.0, min(6.0, dpi / 72))
+                pages = [pdf[index].render(scale=scale).to_pil().convert("RGB")
+                         for index in range(len(pdf))]
+            finally:
+                pdf.close()
+            turned = [page.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor=(255, 255, 255))
+                      for page in pages]
+            buffer = io.BytesIO()
+            turned[0].save(buffer, "PDF", save_all=True, append_images=turned[1:], resolution=float(dpi))
+            path.write_bytes(buffer.getvalue())
+        else:
+            image = Image.open(path).convert("RGB")
+            image.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor=(255, 255, 255)).save(
+                path, "JPEG", quality=92
+            )
+    except Exception:
+        return 0.0  # a page that cannot be rebuilt stays as it was
+    return angle
+
+
 def as_pdf_document(path: Path, rotation: int = 0) -> Any:
     """Every page becomes a PDF so the merge only has to deal with one format."""
     import pypdfium2

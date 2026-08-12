@@ -46,18 +46,41 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cleanup_enabled": False,
     "cleanup_hours": 24,
     "prewarm_enabled": True,
+    "sound_enabled": False,
+    # Nachbearbeitung: beide aus, weil sie Seiten verändern beziehungsweise
+    # verwerfen — das soll niemand ungefragt bekommen.
+    "skip_blank_pages": False,
+    "deskew_enabled": False,
+    "profiles": [],
     "setup_complete": False,
     "ha_enabled": False,
     "ha_api_key": "",
     "ha_webhook_url": "",
+    # MQTT: Home Assistant legt die Geraete selbst an, sobald ein Broker steht.
+    "mqtt_enabled": False,
+    "mqtt_host": "",
+    "mqtt_port": 1883,
+    "mqtt_user": "",
+    "mqtt_password": "",
+    "mqtt_device_name": "ScanDeck",
+    # Push aufs Handy, wenn ein Scan fertig ist.
+    "push_enabled": False,
+    "push_public_key": "",
+    "push_private_key": "",
+    "push_subscriptions": [],
     # Zugriffsschutz ist Opt-in; das Passwort liegt nur als Hash hier.
     "auth_enabled": False,
     "auth_password_hash": "",
     "session_secret": "",
 }
 
-# Never handed out over the API, and never overwritten by an empty value.
-SECRET_KEYS = ("paperless_token", "ha_api_key", "auth_password_hash", "session_secret")
+# Never overwritten by an empty value when settings are saved.
+SECRET_KEYS = ("paperless_token", "ha_api_key", "auth_password_hash", "session_secret",
+               "mqtt_password", "push_private_key")
+# Never handed out over the API. The Home Assistant key is deliberately not in
+# here: it has to be readable once so it can be copied into an automation.
+PRIVATE_KEYS = ("paperless_token", "auth_password_hash", "session_secret",
+                "mqtt_password", "push_private_key", "push_subscriptions")
 # Not settable through the generic settings endpoint — these have their own
 # routes, so a password never travels inside a bulk save.
 PROTECTED_KEYS = ("auth_enabled", "auth_password_hash", "session_secret")
@@ -123,6 +146,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["quick_tags_enabled"] = bool(config.get("quick_tags_enabled"))
     config["cleanup_enabled"] = bool(config.get("cleanup_enabled"))
     config["prewarm_enabled"] = bool(config.get("prewarm_enabled"))
+    config["sound_enabled"] = bool(config.get("sound_enabled"))
     config["cleanup_hours"] = max(1, min(8760, int(config.get("cleanup_hours", 24) or 24)))
     config["setup_complete"] = bool(config.get("setup_complete"))
     config["ha_enabled"] = bool(config.get("ha_enabled"))
@@ -165,11 +189,71 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Scan-Ausgabeverzeichnis muss ein absoluter Pfad im Container sein.")
     config["output_dir"] = str(output_dir)
 
+    config["skip_blank_pages"] = bool(config.get("skip_blank_pages"))
+    config["deskew_enabled"] = bool(config.get("deskew_enabled"))
+
+    config["mqtt_enabled"] = bool(config.get("mqtt_enabled"))
+    config["mqtt_host"] = str(config.get("mqtt_host", "")).strip()
+    config["mqtt_port"] = max(1, min(65535, int(config.get("mqtt_port") or 1883)))
+    config["mqtt_user"] = str(config.get("mqtt_user", "")).strip()
+    config["mqtt_password"] = str(config.get("mqtt_password", ""))
+    config["mqtt_device_name"] = str(config.get("mqtt_device_name", "") or "ScanDeck").strip()[:40]
+    # A bridge without a broker would only produce connection errors.
+    config["mqtt_enabled"] = config["mqtt_enabled"] and bool(config["mqtt_host"])
+
+    config["push_enabled"] = bool(config.get("push_enabled"))
+    config["push_public_key"] = str(config.get("push_public_key", "")).strip()
+    config["push_private_key"] = str(config.get("push_private_key", "")).strip()
+    subscriptions = config.get("push_subscriptions", [])
+    if not isinstance(subscriptions, list):
+        raise ValueError("Push-Abonnements müssen eine Liste sein.")
+    config["push_subscriptions"] = [entry for entry in subscriptions
+                                    if isinstance(entry, dict) and entry.get("endpoint")][:20]
+
     tags = config.get("default_tags", [])
     if not isinstance(tags, list):
         raise ValueError("Standard-Tags müssen eine Liste sein.")
     config["default_tags"] = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
+    config["profiles"] = validate_profiles(config.get("profiles", []))
     return config
+
+
+# What a profile may carry: the scan settings plus where the result should go.
+PROFILE_FIELDS = ("source", "resolution", "color_mode", "output_format", "paper_size",
+                  "duplex", "title_prefix", "correspondent", "document_type")
+MAX_PROFILES = 12
+
+
+def validate_profiles(profiles: Any) -> list[dict[str, Any]]:
+    """One-tap presets: a name, a few scan settings, optional tags."""
+    if not isinstance(profiles, list):
+        raise ValueError("Profile müssen eine Liste sein.")
+    cleaned: list[dict[str, Any]] = []
+    for entry in profiles[:MAX_PROFILES]:
+        if not isinstance(entry, dict):
+            raise ValueError("Jedes Profil muss ein Objekt sein.")
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            raise ValueError("Jedes Profil braucht einen Namen.")
+        profile: dict[str, Any] = {"name": name[:40], "id": str(entry.get("id") or name.lower())[:60]}
+        settings = {key: entry[key] for key in PROFILE_FIELDS if entry.get(key) not in (None, "")}
+        # Validated against the same rules as the stored settings, so a profile
+        # can never smuggle in a value a scan would choke on.
+        checked = validate_config({**default_config(), **settings})
+        profile.update({key: checked[key] for key in settings})
+        tags = entry.get("tags", [])
+        if not isinstance(tags, list):
+            raise ValueError("Profil-Tags müssen eine Liste sein.")
+        profile["tags"] = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
+        # Only stored when the profile really wants to decide this. Otherwise
+        # the global setting applies — a profile should not switch the upload on
+        # for someone who never configured Paperless.
+        if "upload_to_paperless" in entry:
+            profile["upload_to_paperless"] = bool(entry["upload_to_paperless"])
+        cleaned.append(profile)
+    if len({profile["id"] for profile in cleaned}) != len(cleaned):
+        raise ValueError("Profilnamen müssen sich unterscheiden.")
+    return cleaned
 
 
 class ConfigStore:
@@ -202,9 +286,14 @@ class ConfigStore:
     @staticmethod
     def _public_from_config(config: dict[str, Any]) -> dict[str, Any]:
         public_config = config.copy()
-        public_config["paperless_token_configured"] = bool(public_config.pop("paperless_token", ""))
-        public_config["auth_configured"] = bool(public_config.pop("auth_password_hash", ""))
-        public_config.pop("session_secret", None)
+        public_config["paperless_token_configured"] = bool(config.get("paperless_token"))
+        public_config["auth_configured"] = bool(config.get("auth_password_hash"))
+        public_config["mqtt_password_configured"] = bool(config.get("mqtt_password"))
+        public_config["push_devices"] = len(config.get("push_subscriptions") or [])
+        # Strip every secret in one place, so a newly added one cannot be
+        # forgotten here and leak through the settings endpoint.
+        for key in PRIVATE_KEYS:
+            public_config.pop(key, None)
         # The Home Assistant key has to be readable once so users can copy it
         # into their automation; it is generated locally and never leaves the LAN.
         public_config["ha_api_key_configured"] = bool(public_config.get("ha_api_key"))
