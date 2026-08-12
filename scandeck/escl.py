@@ -53,6 +53,10 @@ for _scheme in ("https://", "http://"):
     )
 
 
+class ScanCancelled(RuntimeError):
+    """Raised when the user stopped the scan; not a failure to report as one."""
+
+
 class CapabilityCache:
     """ScannerCapabilities per device, so a scan costs at most one extra request.
 
@@ -87,13 +91,46 @@ capability_cache = CapabilityCache()
 
 
 class ScannerClient:
-    def __init__(self, config: dict[str, Any], log: LogHub, timings: TimingStore | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        log: LogHub,
+        timings: TimingStore | None = None,
+        cancel: threading.Event | None = None,
+    ) -> None:
         self.config = config
         self.log = log
         self.timings = timings
+        self.cancel = cancel or threading.Event()
         self.verify_ssl = config["verify_scanner_ssl"]
+        self._job_url: str | None = None
         if not self.verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def abort(self) -> None:
+        """Stop the run. Safe to call from another thread.
+
+        Deleting the job on the device is what actually interrupts it: the
+        request waiting for the next page cannot be cancelled from here, but it
+        ends as soon as the scanner drops the job.
+        """
+        self.cancel.set()
+        job_url = self._job_url
+        if job_url:
+            self._delete_job(job_url)
+
+    def _stop_if_cancelled(self, pages: list[Path] | None = None) -> None:
+        if self.cancel.is_set():
+            self._discard(pages or [])
+            raise ScanCancelled("Scan abgebrochen.")
+
+    @staticmethod
+    def _discard(pages: list[Path]) -> None:
+        for path in pages:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @property
     def base_url(self) -> str:
@@ -171,7 +208,9 @@ class ScannerClient:
             # what is missing before a job is even created.
             self._require_loaded_feeder(status["adf"])
 
+        self._stop_if_cancelled()
         job_url = self._create_job()
+        self._job_url = job_url
 
         # The scanner streams for as long as the paper takes. With a measured
         # duration for this profile the bar tracks real time instead of guessing.
@@ -181,11 +220,18 @@ class ScannerClient:
             self.log.publish(f"Erwartete Dauer je Seite für dieses Profil: ~{expected:.0f}s")
 
         capture_started = time.monotonic()
+        pages: list[Path] = []
         try:
             with progress_ramp(self.log, "capture", start=25, end=78, expected=expected) as ramp:
                 pages = self._collect_pages(job_url, ramp)
+        except requests.RequestException:
+            # A deleted job tears down the request that was waiting for a page.
+            self._stop_if_cancelled(pages)
+            raise
         finally:
+            self._job_url = None
             self._delete_job(job_url)
+        self._stop_if_cancelled(pages)
 
         if not pages:
             raise RuntimeError("Der Scanner hat kein Dokument geliefert.")
@@ -225,20 +271,20 @@ class ScannerClient:
     def _require_loaded_feeder(self, adf_state: str) -> None:
         if adf_state in ADF_READY:
             return
+        # Short enough to read at a glance on a phone; the log carries the detail.
         if adf_state == ADF_EMPTY:
-            raise RuntimeError(
-                "Der Einzug meldet sich als leer. Bitte die Blätter so einlegen, dass das "
-                "Gerät sie einzieht — oder auf Flachbett umstellen, falls dieser Drucker "
-                "gar keinen Einzug hat (viele DeskJet-Modelle haben nur das Vorlagenglas)."
+            self.log.publish(
+                "Bleibt es bei „leer“, obwohl Papier eingelegt ist, hat dieses Gerät "
+                "vermutlich keinen Einzug — dann bitte das Vorlagenglas nutzen.",
+                "warning",
             )
+            raise RuntimeError("Einzug ist leer — bitte Papier einlegen.")
         if adf_state == ADF_JAM:
-            raise RuntimeError("Im Einzug steckt Papier fest. Bitte entfernen und erneut versuchen.")
+            raise RuntimeError("Papierstau im Einzug — bitte Papier entfernen.")
         if not adf_state:
             # No AdfState at all: the device does not report a feeder, so a
             # feeder job would fail with something far less readable.
-            raise RuntimeError(
-                "Dieser Scanner meldet keinen Einzug. Bitte als Quelle das Flachbett wählen."
-            )
+            raise RuntimeError("Dieser Scanner hat keinen Einzug — bitte Vorlagenglas wählen.")
 
     def _rejection_reason(self, status_code: int) -> str:
         """Say what the device meant. "HTTP 409" alone helps nobody."""
@@ -277,6 +323,12 @@ class ScannerClient:
         pages: list[Path] = []
 
         while len(pages) < limit:
+            # Between sheets is the natural place to stop a feeder run.
+            # Cancelling means this scan did not happen, so half a document is
+            # not left behind for someone to find in Paperless later.
+            if self.cancel.is_set():
+                self._discard(pages)
+                raise ScanCancelled("Scan abgebrochen.")
             response = scanner_session.get(
                 f"{job_url.rstrip('/')}/NextDocument",
                 headers={"Accept": "image/jpeg, application/pdf, application/octet-stream"},
@@ -409,15 +461,44 @@ def _int_or_none(value: str | None) -> int | None:
         return None
 
 
+def _local(element: ET.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _collect(node: ET.Element, tag: str) -> list[str]:
+    """Every distinct value of a tag below this node, order preserved."""
+    seen: dict[str, None] = {}
+    for element in node.iter():
+        if _local(element) == tag and (element.text or "").strip():
+            seen[element.text.strip()] = None
+    return list(seen)
+
+
 def _source_limits(node: ET.Element | None) -> dict[str, Any]:
-    """The scan area and resolution one input source actually supports."""
+    """Everything one input source can do, as the device describes it."""
     if node is None:
         return {}
+    resolutions = sorted({
+        value for value in (_int_or_none(text) for text in _collect(node, "XResolution")) if value
+    })
+    max_optical = _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxOpticalXResolution"))
     return {
         "max_width": _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxWidth")),
         "max_height": _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxHeight")),
-        "max_resolution": _int_or_none(node.findtext(f"{{{SCAN_NS}}}MaxOpticalXResolution")),
+        "max_resolution": max_optical or (resolutions[-1] if resolutions else None),
+        "resolutions": resolutions,
+        "color_modes": _collect(node, "ColorMode"),
+        # Both spellings list the same thing; octet-stream is a fallback, not
+        # a format anyone would choose.
+        "formats": [value for value in
+                    dict.fromkeys(_collect(node, "DocumentFormat") + _collect(node, "DocumentFormatExt"))
+                    if value != "application/octet-stream"],
     }
+
+
+def millimetres(units: int | None) -> int | None:
+    """eSCL measures in 1/300 inch; people measure in millimetres."""
+    return round(units / 300 * 25.4) if units else None
 
 
 def parse_capabilities(xml: str) -> dict[str, Any]:

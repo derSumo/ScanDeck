@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
 import requests
@@ -392,7 +393,7 @@ def test_an_empty_feeder_is_named_as_such(deskjet):
 def test_an_empty_tray_is_named_before_a_job_is_created(scanner):
     """The device answers an empty tray with a bare 409 that blames nothing."""
     device, client = scanner(sheets=3, source="Feeder", adf_state="ScannerAdfEmpty")
-    with pytest.raises(RuntimeError, match="Einzug meldet sich als leer"):
+    with pytest.raises(RuntimeError, match="Einzug ist leer"):
         client.scan()
     # No job was created at all, so nothing has to be cleaned up on the device.
     assert device.settings_xml == ""
@@ -400,13 +401,13 @@ def test_an_empty_tray_is_named_before_a_job_is_created(scanner):
 
 def test_a_paper_jam_is_named(scanner):
     device, client = scanner(sheets=1, source="Feeder", adf_state="ScannerAdfJam")
-    with pytest.raises(RuntimeError, match="steckt Papier fest"):
+    with pytest.raises(RuntimeError, match="Papierstau im Einzug"):
         client.scan()
 
 
 def test_a_device_without_a_feeder_says_so(scanner):
     device, client = scanner(sheets=1, source="Feeder", adf_state="")
-    with pytest.raises(RuntimeError, match="meldet keinen Einzug"):
+    with pytest.raises(RuntimeError, match="keinen Einzug"):
         client.scan()
 
 
@@ -437,3 +438,101 @@ def test_the_status_reports_state_and_tray_together(scanner):
     device, client = scanner(sheets=1, adf_state="ScannerAdfEmpty")
     assert client.full_status() == {"state": "Idle", "adf": "ScannerAdfEmpty"}
     assert client.status() == "Idle"
+
+
+# --- cancelling a run ------------------------------------------------------ #
+
+def test_cancelling_before_the_first_sheet_raises(scanner):
+    from scandeck.escl import ScanCancelled
+
+    device, client = scanner(sheets=3, source="Feeder")
+    client.cancel.set()
+    with pytest.raises(ScanCancelled):
+        client.scan()
+
+
+def test_cancelling_mid_run_leaves_nothing_behind(scanner):
+    """Cancelling means this scan did not happen — no half document survives."""
+    from scandeck.escl import ScanCancelled
+
+    device, client = scanner(sheets=10, source="Feeder")
+    original = device.get
+    collected = []
+
+    def stop_after_two(url, **kwargs):
+        response = original(url, **kwargs)
+        if url.endswith("NextDocument") and device.delivered == 2:
+            client.cancel.set()
+        return response
+
+    device.get = stop_after_two
+    output_dir = Path(client.config["output_dir"])
+    with pytest.raises(ScanCancelled):
+        client.scan()
+    collected = list(output_dir.glob("scan_*"))
+    assert collected == []  # the two sheets already pulled in are gone again
+    assert device.deleted  # and the job was released on the device
+
+
+def test_abort_releases_the_job_on_the_device(scanner):
+    device, client = scanner(sheets=1)
+    client._job_url = "https://10.0.0.31:443/eSCL/ScanJobs/4711"
+    client.abort()
+    assert client.cancel.is_set()
+    assert device.deleted
+
+
+def test_abort_without_a_running_job_is_harmless(scanner):
+    device, client = scanner(sheets=1)
+    client.abort()
+    assert client.cancel.is_set()
+    assert not device.deleted
+
+
+# --- reading what the device can do ---------------------------------------- #
+
+def test_the_resolution_steps_are_read_from_the_device(deck):
+    from scandeck.escl import parse_capabilities
+
+    xml = CAPABILITIES.replace(
+        "<scan:PlatenInputCaps><scan:MinWidth>1</scan:MinWidth></scan:PlatenInputCaps>",
+        "<scan:PlatenInputCaps>"
+        "<scan:SupportedResolutions><scan:DiscreteResolutions>"
+        "<scan:DiscreteResolution><scan:XResolution>75</scan:XResolution>"
+        "<scan:YResolution>75</scan:YResolution></scan:DiscreteResolution>"
+        "<scan:DiscreteResolution><scan:XResolution>300</scan:XResolution>"
+        "<scan:YResolution>300</scan:YResolution></scan:DiscreteResolution>"
+        "<scan:DiscreteResolution><scan:XResolution>1200</scan:XResolution>"
+        "<scan:YResolution>1200</scan:YResolution></scan:DiscreteResolution>"
+        "</scan:DiscreteResolutions></scan:SupportedResolutions>"
+        "</scan:PlatenInputCaps>",
+    )
+    limits = parse_capabilities(xml)["limits"]["Platen"]
+    assert limits["resolutions"] == [75, 300, 1200]
+    # Without MaxOpticalXResolution the highest step is the ceiling.
+    assert limits["max_resolution"] == 1200
+
+
+def test_colour_modes_and_formats_are_read_without_duplicates(deck):
+    from scandeck.escl import parse_capabilities
+
+    xml = CAPABILITIES.replace(
+        "<scan:PlatenInputCaps><scan:MinWidth>1</scan:MinWidth></scan:PlatenInputCaps>",
+        "<scan:PlatenInputCaps>"
+        "<scan:ColorMode>RGB24</scan:ColorMode><scan:ColorMode>Grayscale8</scan:ColorMode>"
+        "<pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>"
+        "<scan:DocumentFormatExt>application/pdf</scan:DocumentFormatExt>"
+        "<pwg:DocumentFormat>application/octet-stream</pwg:DocumentFormat>"
+        "</scan:PlatenInputCaps>",
+    )
+    limits = parse_capabilities(xml)["limits"]["Platen"]
+    assert limits["color_modes"] == ["RGB24", "Grayscale8"]
+    assert limits["formats"] == ["application/pdf"]  # listed once, no octet-stream
+
+
+def test_millimetres_converts_the_escl_unit(deck):
+    from scandeck.escl import millimetres
+
+    assert millimetres(2480) == 210  # A4 width
+    assert millimetres(3508) == 297  # A4 height
+    assert millimetres(None) is None

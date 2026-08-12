@@ -13,6 +13,20 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-12
+
+### Hinzugefügt
+
+- **Scan abbrechen.** In der Fortschrittsanzeige sitzt jetzt ein Abbruch-Knopf. Er stoppt den Auftrag auch auf dem Gerät, sodass der Scanner sofort wieder frei ist — ohne das würde eine wartende Anfrage weiterlaufen, bis das Papier durch ist. Abbrechen heißt dabei: Dieser Scan hat nicht stattgefunden. Bereits eingezogene Blätter werden verworfen, damit kein halbes Dokument in Paperless landet. Was in einem Stapel vorher schon gesammelt wurde, bleibt selbstverständlich erhalten.
+- **Seitenlupe im Stapel.** Ein Tipp auf ein Vorschaubild zeigt die Seite groß — mit Pfeilen zum Blättern, Tastatursteuerung und den Aktionen Drehen, Neu scannen und Entfernen direkt darunter. Auf den kleinen Kacheln war schlicht nicht zu erkennen, welche Seite welche ist, und genau das ist beim Sortieren die Frage.
+- **„Was dein Scanner kann“** als eigene Karte in den Einstellungen: ausgelesen aus dem Gerät, je Quelle die unterstützten Auflösungen, die scanbare Fläche in Millimetern, die möglichen Papierformate, Farbmodi und Dateiformate. Damit lässt sich nachsehen, statt zu raten, wie viel dpi der eigene Drucker wirklich schafft.
+- Die DPI-Auswahl richtet sich nach den Stufen, die das Gerät tatsächlich meldet, statt nur nach einer Obergrenze. Nicht unterstützte Stufen sind gesperrt und nennen im Tooltip, was stattdessen geht.
+
+### Geändert
+
+- Die Meldung bei leerem Einzug ist kurz und sagt, was zu tun ist: „Einzug ist leer — bitte Papier einlegen.“ Der ausführliche Hinweis, dass ein Gerät womöglich gar keinen Einzug hat, steht weiterhin im Protokoll.
+- Fehler- und Warnmeldungen bleiben deutlich länger stehen (12 beziehungsweise 9 statt 3,6 Sekunden) und lassen sich mit einem Klick wegwischen. Bisher war eine längere Fehlermeldung verschwunden, bevor man sie zu Ende gelesen hatte.
+
 ## [1.6.2] - 2026-08-12
 
 ### Behoben
@@ -69,7 +83,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
 - Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
 - Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
-- Testsuite (150 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+- Testsuite (161 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
 
 ## [1.5.0] - 2026-08-11
 
@@ -175,7 +189,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.6.2...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/derSumo/ScanDeck/compare/v1.6.2...v1.7.0
 [1.6.2]: https://github.com/derSumo/ScanDeck/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/derSumo/ScanDeck/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/derSumo/ScanDeck/compare/v1.5.0...v1.6.0

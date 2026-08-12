@@ -28,6 +28,7 @@ const STAGE_TEXT = {
   upload: "Übertrage nach Paperless-ngx …",
   done: "Fertig",
   error: "Fehlgeschlagen",
+  cancelled: "Abgebrochen",
 };
 
 const STAGE_ORDER = ["connect", "capture", "store", "upload"];
@@ -45,6 +46,7 @@ const state = {
   queue: 0,
   auth: { enabled: false, authenticated: true },
   capabilities: { known: false },
+  pageIndex: 0,
   eta: null,
   etaAt: 0,
   scanStart: 0,
@@ -54,12 +56,20 @@ const state = {
 
 /* --- helpers ------------------------------------------------------------- */
 
+// Fehler und Warnungen wollen gelesen werden; eine Bestaetigung darf huschen.
+const TOAST_SECONDS = { error: 12, warning: 9 };
+
 function toast(message, kind = "") {
   const element = $("#toast");
   element.textContent = message;
   element.className = `toast show ${kind}`;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (element.className = "toast"), 3600);
+  toast.timer = setTimeout(() => (element.className = "toast"), (TOAST_SECONDS[kind] || 3.6) * 1000);
+  // Wer sie gelesen hat, klickt sie weg.
+  element.onclick = () => {
+    clearTimeout(toast.timer);
+    element.className = "toast";
+  };
 }
 
 async function api(url, options = {}) {
@@ -132,11 +142,23 @@ function syncDeviceLimits() {
     if (!ok && button.classList.contains("active")) setSegment("paper-size", sizes[0] || "A4");
   });
 
+  // Die Liste der Stufen kennt das Geraet selbst; sie schlaegt die Obergrenze.
+  const steps = caps.known && caps.resolutions ? caps.resolutions[source] : null;
   $$('.seg[data-target="resolution"] button').forEach((button) => {
-    const ok = !maxDpi || Number(button.dataset.value) <= maxDpi;
+    const dpi = Number(button.dataset.value);
+    const ok = steps && steps.length ? steps.includes(dpi) : !maxDpi || dpi <= maxDpi;
     button.disabled = !ok;
-    button.title = ok ? "" : `Diese Quelle scannt höchstens ${maxDpi} dpi`;
-    if (!ok && button.classList.contains("active")) setSegment("resolution", maxDpi);
+    button.title = ok
+      ? ""
+      : steps && steps.length
+      ? `Diese Quelle kann: ${steps.join(", ")} dpi`
+      : `Diese Quelle scannt höchstens ${maxDpi} dpi`;
+    if (!ok && button.classList.contains("active")) {
+      const fallback = steps && steps.length
+        ? steps.reduce((best, value) => (Math.abs(value - dpi) < Math.abs(best - dpi) ? value : best))
+        : maxDpi;
+      setSegment("resolution", fallback);
+    }
   });
   syncDuplexRow();
 }
@@ -145,6 +167,47 @@ async function loadCapabilities() {
   const caps = await api("/api/scanner/capabilities").catch(() => ({ known: false }));
   state.capabilities = caps;
   syncDeviceLimits();
+  renderDeviceSheet();
+}
+
+const COLOR_NAMES = { RGB24: "Farbe", Grayscale8: "Graustufen", BlackAndWhite1: "Schwarzweiß" };
+const FORMAT_NAMES = { "application/pdf": "PDF", "image/jpeg": "JPEG" };
+
+// Antwortet auf "was kann mein Drucker eigentlich?" - ausgelesen, nicht geraten.
+function renderDeviceSheet() {
+  const caps = state.capabilities;
+  const card = $("#device-card");
+  card.hidden = !caps.known || !(caps.sheet || []).length;
+  if (card.hidden) return;
+
+  $("#device-model").textContent = `${caps.model} · eSCL ${caps.version}`
+    + (caps.duplex ? " · beidseitiger Einzug" : "");
+
+  const container = $("#device-sheet");
+  container.replaceChildren();
+  caps.sheet.forEach((source) => {
+    const box = document.createElement("div");
+    box.className = "device-source";
+    const title = document.createElement("b");
+    title.textContent = source.label;
+    const list = document.createElement("dl");
+    const rows = [
+      ["Auflösung", source.resolutions.length ? `${source.resolutions.join(", ")} dpi` : "nicht gemeldet"],
+      ["Fläche", source.area_mm[0] ? `${source.area_mm[0]} × ${source.area_mm[1]} mm` : "nicht gemeldet"],
+      ["Papier", source.paper_sizes.join(", ") || "—"],
+      ["Farbe", source.color_modes.map((mode) => COLOR_NAMES[mode] || mode).join(", ") || "—"],
+      ["Format", source.formats.map((format) => FORMAT_NAMES[format] || format).join(", ") || "—"],
+    ];
+    rows.forEach(([label, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      list.append(dt, dd);
+    });
+    box.append(title, list);
+    container.append(box);
+  });
 }
 
 function renderChips(container, tags, onRemove) {
@@ -631,10 +694,20 @@ function renderBatch(batch) {
       toolButton("remove", `Seite ${index + 1} entfernen`, () => removePage(index))
     );
 
+    // Gross ansehen: auf dem Vorschaubild ist kaum zu erkennen, welche Seite
+    // welche ist - beim Sortieren ist genau das aber die Frage.
+    image.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openPage(index);
+    });
+
     tile.append(image, number, grip, tools);
     makeDraggable(tile);
     container.append(tile);
   });
+
+  // Steht die Lupe offen, zeigt sie nach jeder Aenderung den neuen Stand.
+  if (!$("#page-overlay").hidden) showPage(state.pageIndex);
 
   const armedNow = armed !== null && armed !== undefined;
   $("#orb-label").textContent = state.running
@@ -998,6 +1071,10 @@ function showProgress() {
   overlay.hidden = false;
   overlay.classList.remove("closing");
   $("#progress-title").textContent = state.progressTitle || "Scan läuft";
+  const cancel = $("#scan-cancel");
+  cancel.disabled = false;
+  cancel.hidden = false;
+  cancel.textContent = "Scan abbrechen";
   state.scanStart = Date.now();
   state.eta = null;
   state.etaAt = 0;
@@ -1146,9 +1223,23 @@ function handleProgress(event) {
       refreshState().catch(() => {});
     }, 620);
   }
+  if (event.stage === "cancelled") {
+    $("#progress-title").textContent = "Abgebrochen";
+    $("#scan-cancel").hidden = true;
+    setTimeout(() => {
+      hideProgress();
+      setScanning(false);
+      loadBatch().catch(() => {});
+      loadHistory().catch(() => {});
+      toast("Scan abgebrochen", "warning");
+    }, 700);
+  }
+
   if (event.stage === "error") {
     $("#progress-title").textContent = "Fehlgeschlagen";
     $("#progress-stage").textContent = event.error || "Unbekannter Fehler";
+    $("#scan-cancel").hidden = true;
+    // Fehler bleiben laenger stehen: sie wollen gelesen werden, nicht erahnt.
     setTimeout(() => {
       hideProgress();
       setScanning(false);
@@ -1622,6 +1713,75 @@ $("#preview-overlay").addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closePreview();
+});
+
+/* --- Seitenlupe ----------------------------------------------------------- */
+
+function openPage(index) {
+  $("#page-overlay").hidden = false;
+  document.body.classList.add("is-locked");
+  showPage(index);
+}
+
+function showPage(index) {
+  const pages = state.batch.pages || [];
+  if (!pages.length) return closePage();
+  state.pageIndex = Math.max(0, Math.min(index, pages.length - 1));
+  const page = pages[state.pageIndex];
+  $("#page-title").textContent = `Seite ${state.pageIndex + 1} von ${pages.length}`;
+  const image = $("#page-image");
+  image.src = `/api/batch/page/${state.pageIndex}/preview?v=${encodeURIComponent(page.name)}&r=${page.rotation || 0}`;
+  image.alt = `Seite ${state.pageIndex + 1}`;
+  $("#page-prev").disabled = state.pageIndex === 0;
+  $("#page-next").disabled = state.pageIndex === pages.length - 1;
+  $("#page-replace").textContent =
+    state.batch.replace_index === state.pageIndex ? "Ersetzen abbrechen" : "Neu scannen";
+}
+
+function closePage() {
+  $("#page-overlay").hidden = true;
+  document.body.classList.remove("is-locked");
+  $("#page-image").removeAttribute("src");
+}
+
+$("#page-close").addEventListener("click", closePage);
+$("#page-overlay").addEventListener("click", (event) => {
+  if (event.target === $("#page-overlay")) closePage();
+});
+$("#page-prev").addEventListener("click", () => showPage(state.pageIndex - 1));
+$("#page-next").addEventListener("click", () => showPage(state.pageIndex + 1));
+$("#page-rotate").addEventListener("click", () => rotatePage(state.pageIndex));
+$("#page-replace").addEventListener("click", async () => {
+  const armed = state.batch.replace_index === state.pageIndex;
+  await armReplace(armed ? null : state.pageIndex);
+  closePage();
+});
+$("#page-remove").addEventListener("click", async () => {
+  const index = state.pageIndex;
+  await removePage(index);
+  const pages = state.batch.pages || [];
+  if (!pages.length) closePage();
+  else showPage(Math.min(index, pages.length - 1));
+});
+
+document.addEventListener("keydown", (event) => {
+  if ($("#page-overlay").hidden) return;
+  if (event.key === "Escape") closePage();
+  if (event.key === "ArrowLeft") showPage(state.pageIndex - 1);
+  if (event.key === "ArrowRight") showPage(state.pageIndex + 1);
+});
+
+/* --- Scan abbrechen ------------------------------------------------------- */
+
+$("#scan-cancel").addEventListener("click", async () => {
+  const button = $("#scan-cancel");
+  button.disabled = true;
+  button.textContent = "Wird abgebrochen …";
+  try {
+    await api("/api/scan/cancel", { method: "POST" });
+  } catch (error) {
+    toast(error.message, "error");
+  }
 });
 
 /* --- Zugriffsschutz ------------------------------------------------------- */

@@ -83,7 +83,7 @@ Damit iOS die App installieren lässt, muss die Seite über HTTPS oder `localhos
 
 **Dashboard** ist auf den täglichen Ablauf reduziert: großer Scan-Button mit Fortschrittsring, vier antippbare Schnellschalter (Quelle, Format, DPI, Farbe — jeder Tipp schaltet weiter und speichert sofort), Session-Tags nur für den nächsten Scan, Statuskacheln und ein einklappbares Live-Protokoll.
 
-Während des Scans erscheint eine Fortschrittsanzeige mit Prozentwert, Laufzeit und Phasen (Verbindung → Erfassen → Speichern → Upload). Anschließend wird der Scan **10 Sekunden lang als Vorschau** eingeblendet (Dauer unter *Einstellungen → Ausgabe* änderbar, `0` schaltet sie ab). Über *Angeheftet lassen* bleibt die Vorschau offen, *Öffnen* zeigt die Originaldatei.
+Während des Scans erscheint eine Fortschrittsanzeige mit Prozentwert, Laufzeit und Phasen (Verbindung → Erfassen → Speichern → Upload) sowie ein **Abbruch-Knopf**. Der stoppt den Auftrag auch auf dem Gerät, sodass der Scanner sofort wieder frei ist. Abbrechen heißt: Dieser Scan hat nicht stattgefunden — bereits eingezogene Blätter werden verworfen, damit kein halbes Dokument in Paperless landet. Ein laufender Stapel behält natürlich alles, was vorher schon gesammelt wurde. Anschließend wird der Scan **10 Sekunden lang als Vorschau** eingeblendet (Dauer unter *Einstellungen → Ausgabe* änderbar, `0` schaltet sie ab). Über *Angeheftet lassen* bleibt die Vorschau offen, *Öffnen* zeigt die Originaldatei.
 
 ### Mehrere Seiten in eine PDF
 
@@ -95,6 +95,7 @@ Was du mit einer einzelnen Seite machen kannst — das Fragezeichen neben der Ü
 - **↻ Drehen** — dreht die Seite um 90° im Uhrzeigersinn, genau so wie sie später im PDF liegt. Mehrfach drücken dreht weiter.
 - **⟳ Neu scannen** — markiert die Seite; der nächste Scan tauscht genau diese Seite 1:1 aus, die Reihenfolge bleibt. Nochmal drücken bricht ab.
 - **× Entfernen** — wirft die Seite aus dem Stapel.
+- **Antippen** — zeigt die Seite groß. Auf der kleinen Kachel ist oft nicht zu erkennen, welche Seite welche ist; in der Lupe blätterst du mit den Pfeilen (oder den Pfeiltasten) durch den Stapel und kannst von dort aus drehen, neu scannen oder entfernen.
 
 Während ein Stapel gesammelt wird, zeigt die Fortschrittsanzeige nur drei Schritte — es wird ja nichts hochgeladen. Der Upload-Schritt taucht erst beim Abschließen wieder auf.
 
@@ -116,7 +117,9 @@ Unter *Einstellungen → Ausgabe* stehen dazu **Papierformat** (A4, Letter, Lega
 
 **Hat dein Gerät überhaupt einen Einzug?** Nicht jeder Drucker, dessen Firmware einen Einzug meldet, hat auch einen. Der Test dafür dauert zehn Sekunden: Papier in den Einzug legen, dann *Einstellungen → Scanner → Verbindung testen* drücken und ins Protokoll sehen. Steht dort „Einzug: bestückt“, ist alles in Ordnung. Bleibt es bei „Einzug: leer“, erkennt das Gerät kein Papier — dann liegt es nicht weit genug drin, oder der Drucker hat nur ein Vorlagenglas. In dem Fall meldet ScanDeck das vor dem Scan im Klartext, statt einen Auftrag abzuschicken, den der Drucker mit „HTTP 409“ zurückweist.
 
-ScanDeck fragt dabei ab, was dein Gerät überhaupt kann, und bietet nur das an: Ein Vorlagenglas, das bei A4 endet, zeigt Legal durchgestrichen; ein Einzug, der bei 300 dpi aufhört, sperrt 600 und 1200; ohne beidseitigen Einzug fehlt der Duplex-Schalter. Kommt eine Einstellung trotzdem einmal nicht durch — etwa aus einer älteren Konfiguration —, wird sie auf das machbare Maß gebracht und die Anpassung im Protokoll genannt, statt den Scan mit einem nackten „HTTP 409“ abzubrechen.
+Unter *Einstellungen → Was dein Scanner kann* steht, was das Gerät gemeldet hat: je Quelle die unterstützten Auflösungen, die scanbare Fläche in Millimetern, die möglichen Papierformate, Farbmodi und Dateiformate. Da lässt sich nachsehen statt raten, wie viel dpi der eigene Drucker wirklich schafft.
+
+ScanDeck fragt das auch selbst ab und bietet nur an, was geht: Ein Vorlagenglas, das bei A4 endet, zeigt Legal durchgestrichen; ein Einzug, der bei 300 dpi aufhört, sperrt 600 und 1200; ohne beidseitigen Einzug fehlt der Duplex-Schalter. Kommt eine Einstellung trotzdem einmal nicht durch — etwa aus einer älteren Konfiguration —, wird sie auf das machbare Maß gebracht und die Anpassung im Protokoll genannt, statt den Scan mit einem nackten „HTTP 409“ abzubrechen.
 
 ### Verlauf und Warteschlange
 

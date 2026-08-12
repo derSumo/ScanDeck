@@ -155,3 +155,77 @@ def test_an_unreadable_document_still_becomes_one_batch_tile(client, deck, run_s
     state = run_scan(BrokenPdfScanner(sheets=1), source="Platen")
     assert state["last_error"] is None
     assert len(client.get("/api/batch").get_json()["pages"]) == 1
+
+
+# --- cancelling ------------------------------------------------------------ #
+
+def test_cancelling_a_run_adds_nothing_to_the_batch(client, deck, monkeypatch):
+    """Half a feeder run must not turn into pages nobody asked for."""
+    from scandeck import escl
+
+    client.post("/api/batch/start")
+    device = FakeScanner(sheets=6)
+    monkeypatch.setattr(escl, "scanner_session", device)
+    deck.store.patch(scanner_url="https://10.0.0.31:443", source="Feeder")
+
+    original = device.get
+
+    def stop_after_two(url, **kwargs):
+        response = original(url, **kwargs)
+        if url.endswith("NextDocument") and device.delivered == 2:
+            deck.cancel_active_scan()
+        return response
+
+    device.get = stop_after_two
+    deck.scan_lock.acquire()
+    deck.scan_worker([], "ui", {})
+
+    assert client.get("/api/batch").get_json()["pages"] == []
+    assert deck.scan_state["last_error"] is None  # cancelling is not a failure
+    assert deck.scan_state["stage"] == "cancelled"
+    # And the scanner is free for the next attempt straight away.
+    assert deck.scan_lock.acquire(blocking=False) is True
+    deck.scan_lock.release()
+
+
+def test_cancelling_records_no_history_entry(client, deck, monkeypatch):
+    from scandeck import escl
+
+    device = FakeScanner(sheets=4)
+    monkeypatch.setattr(escl, "scanner_session", device)
+    deck.store.patch(scanner_url="https://10.0.0.31:443", source="Feeder")
+    original = device.get
+
+    def stop_immediately(url, **kwargs):
+        if url.endswith("NextDocument"):
+            deck.cancel_active_scan()
+        return original(url, **kwargs)
+
+    device.get = stop_immediately
+    deck.scan_lock.acquire()
+    deck.scan_worker([], "ui", {})
+
+    assert client.get("/api/history").get_json()["jobs"] == []
+
+
+def test_the_cancel_endpoint_refuses_when_nothing_runs(client):
+    assert client.post("/api/scan/cancel").status_code == 409
+
+
+def test_the_cancel_endpoint_stops_a_running_scan(client, deck):
+    class Stoppable:
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
+    stoppable = Stoppable()
+    deck.set_active_scan(stoppable)
+    deck.scan_state["running"] = True
+    try:
+        assert client.post("/api/scan/cancel").status_code == 202
+        assert stoppable.aborted
+    finally:
+        deck.scan_state["running"] = False
+        deck.set_active_scan(None)

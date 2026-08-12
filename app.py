@@ -49,7 +49,15 @@ from scandeck.documents import (
     preview_cache,
     render_preview,
 )
-from scandeck.escl import ADF_EMPTY, ADF_LABELS, ADF_READY, ScannerClient, paper_sizes_for
+from scandeck.escl import (
+    ADF_EMPTY,
+    ADF_LABELS,
+    ADF_READY,
+    ScanCancelled,
+    ScannerClient,
+    millimetres,
+    paper_sizes_for,
+)
 from scandeck.events import LogHub, TooManySubscribers
 from scandeck.jobs import JobStore, TimingStore
 from scandeck.network import (
@@ -87,6 +95,26 @@ scan_state: dict[str, Any] = {
     "last_error": None,
     "trigger": None,
 }
+
+
+# The scanner client of the run in flight, so it can be stopped from a request
+# thread while the worker thread waits on the device.
+active_scan: dict[str, Any] = {"client": None}
+active_scan_lock = threading.Lock()
+
+
+def set_active_scan(client: Any) -> None:
+    with active_scan_lock:
+        active_scan["client"] = client
+
+
+def cancel_active_scan() -> bool:
+    with active_scan_lock:
+        client = active_scan["client"]
+    if not client:
+        return False
+    client.abort()
+    return True
 
 
 def _mirror_progress(stage: str, percent: int) -> None:
@@ -389,7 +417,9 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
         logs.progress("start", 4)
         if config["upload_to_paperless"]:
             PaperlessClient(config, logs).require_config()
-        sheets = ScannerClient(config, logs, timings).scan()
+        scanner = ScannerClient(config, logs, timings)
+        set_active_scan(scanner)
+        sheets = scanner.scan()
 
         if batch.active():
             # Collect the sheets; nothing is uploaded until the batch is closed.
@@ -413,12 +443,18 @@ def scan_worker(session_tags: list[str], trigger: str, overrides: dict[str, Any]
         logs.progress("done", 100, file=target.name, pages=count)
         logs.publish("Workflow abgeschlossen.", "success")
         notify_home_assistant(config, "success", target.name, None)
+    except ScanCancelled:
+        # Stopping on purpose is not a failure, so it is not reported as one.
+        scan_state["last_error"] = None
+        logs.progress("cancelled", 100)
+        logs.publish("Scan abgebrochen.", "warning")
     except Exception as error:  # surface every device/API failure in the log stream
         scan_state["last_error"] = str(error)
         logs.progress("error", 100, error=str(error))
         logs.publish(f"Workflow fehlgeschlagen: {error}", "error")
         notify_home_assistant(store.get(), "error", None, str(error))
     finally:
+        set_active_scan(None)
         scan_state["running"] = False
         scan_lock.release()
 
@@ -647,15 +683,35 @@ def feeder_hint(adf_state: str) -> str:
     return "wird von diesem Gerät nicht gemeldet."
 
 
+SOURCE_LABELS = {"Platen": "Vorlagenglas", "Feeder": "Einzug"}
+
+
 def capability_summary(capabilities: dict[str, Any]) -> dict[str, Any]:
     """What the interface needs in order to only offer what the device can do."""
     limits = capabilities.get("limits") or {}
+    sources = capabilities.get("sources") or []
     return {
         **capabilities,
         "paper_sizes": {source: paper_sizes_for(limits.get(source) or {})
                         for source in ("Platen", "Feeder")},
         "max_resolution": {source: (limits.get(source) or {}).get("max_resolution")
                            for source in ("Platen", "Feeder")},
+        "resolutions": {source: (limits.get(source) or {}).get("resolutions") or []
+                        for source in ("Platen", "Feeder")},
+        # A readable sheet for the settings page: what can this device do?
+        "sheet": [
+            {
+                "source": source,
+                "label": SOURCE_LABELS.get(source, source),
+                "area_mm": [millimetres((limits.get(source) or {}).get("max_width")),
+                            millimetres((limits.get(source) or {}).get("max_height"))],
+                "paper_sizes": paper_sizes_for(limits.get(source) or {}),
+                "resolutions": (limits.get(source) or {}).get("resolutions") or [],
+                "color_modes": (limits.get(source) or {}).get("color_modes") or [],
+                "formats": (limits.get(source) or {}).get("formats") or [],
+            }
+            for source in sources
+        ],
     }
 
 
@@ -761,6 +817,15 @@ def start_scan() -> Response:
     if not start_scan_job(session_tags, "ui", payload.get("overrides")):
         return jsonify({"error": "Ein Scan läuft bereits."}), 409
     return jsonify({"ok": True, "message": "Scan wurde gestartet."}), 202
+
+
+@app.post("/api/scan/cancel")
+def cancel_scan() -> Response:
+    """Stop the running scan. Sheets already pulled in are kept."""
+    if not scan_state["running"] or not cancel_active_scan():
+        return jsonify({"ok": False, "error": "Es läuft gerade kein Scan."}), 409
+    logs.publish("Abbruch angefordert …", "warning")
+    return jsonify({"ok": True}), 202
 
 
 @app.get("/api/batch")

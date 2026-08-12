@@ -920,6 +920,69 @@ select:focus { outline: none; border-color: rgba(255, 176, 60, 0.5); }
 }
 .overlay.closing { animation: fade-out 0.28s var(--ease) both; }
 
+/* Seitenlupe im Stapel ---------------------------------------------------- */
+.page-sheet {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 40px);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  animation: sheet-in 0.3s var(--ease) both;
+}
+.page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.page-head b { font-size: 15px; }
+.page-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  background: #0b0d0e;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.page-stage img { max-width: 100%; max-height: 62vh; object-fit: contain; display: block; }
+.page-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 60px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+.page-nav:hover { background: rgba(0, 0, 0, 0.72); }
+.page-nav:disabled { opacity: 0.25; cursor: default; }
+#page-prev { left: 8px; }
+#page-next { right: 8px; }
+.page-foot { display: flex; gap: 10px; flex-wrap: wrap; }
+.page-foot .btn { flex: 1 1 auto; }
+/* Kachel als anklickbare Lupe kennzeichnen. */
+.batch-page img { cursor: zoom-in; }
+
+/* Geraeteuebersicht ------------------------------------------------------- */
+.device-sheet { display: grid; gap: 12px; }
+.device-source {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+.device-source b { font-size: 13.5px; color: var(--accent); }
+.device-source dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; font-size: 12.5px; }
+.device-source dt { color: var(--text-faint); }
+.device-source dd { margin: 0; }
+
 /* Anmeldung --------------------------------------------------------------- */
 body.is-locked { overflow: hidden; }
 #login-overlay { z-index: 90; }

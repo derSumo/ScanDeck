@@ -312,6 +312,13 @@
           <p class="hint">Zusatzfunktionen bleiben aus, damit das Dashboard schlank bleibt.</p>
         </section>
 
+        <section class="card" id="device-card" hidden>
+          <div class="card-head"><h2>Was dein Scanner kann</h2></div>
+          <p class="hint" id="device-model">—</p>
+          <div id="device-sheet" class="device-sheet"></div>
+          <button id="device-refresh" class="btn ghost wide" type="button">Gerät neu auslesen</button>
+        </section>
+
         <section class="card">
           <div class="card-head"><h2>Zugriffsschutz</h2></div>
           <p class="hint">Aus, weil ScanDeck für das eigene Netz gedacht ist. Eingeschaltet verlangt die Oberfläche ein Passwort — sinnvoll, wenn Gäste im WLAN sind oder mehrere Haushalte am selben Netz hängen. Die Home-Assistant-Schnittstelle bleibt über ihren API-Key erreichbar.</p>
@@ -412,6 +419,27 @@
           <li data-stage="store">Speichern</li>
           <li data-stage="upload" data-optional="upload">Upload</li>
         </ol>
+        <button id="scan-cancel" class="btn ghost danger wide" type="button">Scan abbrechen</button>
+      </div>
+    </div>
+
+    <!-- ───────────────────────── Seitenlupe ───────────────────────── -->
+    <div id="page-overlay" class="overlay" hidden>
+      <div class="page-sheet">
+        <header class="page-head">
+          <b id="page-title">Seite 1</b>
+          <button id="page-close" class="btn tiny ghost" type="button" aria-label="Schließen">Schließen</button>
+        </header>
+        <div class="page-stage">
+          <button id="page-prev" class="page-nav" type="button" aria-label="Vorherige Seite">‹</button>
+          <img id="page-image" alt="">
+          <button id="page-next" class="page-nav" type="button" aria-label="Nächste Seite">›</button>
+        </div>
+        <footer class="page-foot">
+          <button id="page-rotate" class="btn ghost" type="button">Drehen</button>
+          <button id="page-replace" class="btn ghost" type="button">Neu scannen</button>
+          <button id="page-remove" class="btn ghost danger" type="button">Entfernen</button>
+        </footer>
       </div>
     </div>
 
