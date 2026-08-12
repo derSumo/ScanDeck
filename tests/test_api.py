@@ -247,3 +247,52 @@ def test_a_device_without_a_feeder_reports_only_the_flatbed(client, deck, monkey
     body = client.get("/api/scanner/capabilities").get_json()
     assert body["sources"] == ["Platen"]
     assert [entry["source"] for entry in body["sheet"]] == ["Platen"]
+
+
+# --- live tray state ------------------------------------------------------- #
+
+def test_the_tray_endpoint_answers_the_current_state(client, deck, monkeypatch):
+    from scandeck import escl
+    from tests.test_escl import DeskJet
+
+    escl.capability_cache.clear()
+    device = DeskJet(adf_state="ScannerAdfEmpty")
+    monkeypatch.setattr(escl, "scanner_session", device)
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+
+    body = client.get("/api/scanner/tray").get_json()
+    assert body == {"ok": True, "adf_state": "ScannerAdfEmpty", "ready": False, "device_state": "Idle"}
+
+    # Paper goes in; the very next call has to say so, never a cached answer.
+    device.adf_state = "ScannerAdfLoaded"
+    assert client.get("/api/scanner/tray").get_json()["ready"] is True
+
+
+def test_the_tray_endpoint_stays_quiet_without_a_scanner(client):
+    assert client.get("/api/scanner/tray").get_json() == {"ok": False, "adf_state": ""}
+
+
+def test_the_tray_is_not_asked_while_a_scan_runs(client, deck, monkeypatch):
+    """The device is busy; a status poll would only get in the way."""
+    from scandeck import escl
+    from tests.test_escl import DeskJet
+
+    monkeypatch.setattr(escl, "scanner_session", DeskJet())
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+    deck.scan_state["running"] = True
+    try:
+        assert client.get("/api/scanner/tray").get_json()["ok"] is False
+    finally:
+        deck.scan_state["running"] = False
+
+
+def test_an_unreachable_scanner_does_not_break_the_tray_endpoint(client, deck, monkeypatch):
+    from scandeck import escl
+
+    class Offline:
+        def get(self, *args, **kwargs):
+            raise escl.requests.ConnectionError("weg")
+
+    monkeypatch.setattr(escl, "scanner_session", Offline())
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+    assert client.get("/api/scanner/tray").get_json() == {"ok": False, "adf_state": ""}

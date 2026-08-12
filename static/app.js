@@ -11,10 +11,16 @@ const LABELS = {
   output_format: { "application/pdf": "PDF", "image/jpeg": "JPEG" },
 };
 
+// Die Leiter, die im Alltag zaehlt. Unter 150 dpi wird Text unbrauchbar,
+// 1200 dpi ist ein Sonderfall und steht nur in den Einstellungen.
+const DPI_STEPS = [150, 300, 600, 1200];
+const DPI_QUICK = [150, 300, 600];
+const DPI_SLOW = 1200; // dauert je nach Geraet Minuten
+
 const QUICK_CYCLE = {
   source: ["Platen", "Feeder"],
   output_format: ["application/pdf", "image/jpeg"],
-  resolution: [150, 200, 300, 600],
+  resolution: DPI_QUICK,
   color_mode: ["RGB24", "Grayscale8"],
 };
 
@@ -176,21 +182,17 @@ function syncDeviceLimits() {
     (allowed) => allowed[0]
   );
 
-  // Die Stufen kennt das Geraet selbst, also werden genau die angeboten -
-  // eine durchgestrichene Liste voller unmoeglicher Werte hilft niemandem.
-  const steps = forSource("resolutions");
-  renderResolutionSegment(steps && steps.length ? steps : null, maxDpi);
+  // Die Obergrenze des Geraets entscheidet, welche Stufen der Leiter bleiben.
+  renderResolutionSegment(maxDpi);
   syncDuplexRow();
   renderFeederState();
 }
 
-const DEFAULT_DPI_STEPS = [75, 150, 200, 300, 600, 1200];
-
-function renderResolutionSegment(steps, maxDpi) {
+function renderResolutionSegment(maxDpi) {
   const group = $('.seg[data-target="resolution"]');
   if (!group) return;
   const wanted = Number(getSegment("resolution", state.config.resolution)) || 300;
-  const options = steps || DEFAULT_DPI_STEPS.filter((dpi) => !maxDpi || dpi <= maxDpi);
+  const options = DPI_STEPS.filter((dpi) => !maxDpi || dpi <= maxDpi);
   const signature = options.join(",");
   if (group.dataset.signature !== signature) {
     group.dataset.signature = signature;
@@ -200,6 +202,7 @@ function renderResolutionSegment(steps, maxDpi) {
         button.type = "button";
         button.dataset.value = String(dpi);
         button.textContent = String(dpi);
+        if (dpi === DPI_SLOW) button.title = "Sehr fein — ein Scan kann mehrere Minuten dauern";
         return button;
       })
     );
@@ -211,6 +214,8 @@ function renderResolutionSegment(steps, maxDpi) {
                      options[0]);
   setSegment("resolution", nearest);
   state.config.resolution = nearest;
+  const note = $("#dpi-note");
+  if (note) note.hidden = nearest !== DPI_SLOW;
 }
 
 // Die Schnellschalter auf das eingrenzen, was der Scanner gemeldet hat.
@@ -224,10 +229,8 @@ function quickOptions(key) {
   }
   const source = state.config.source || "Platen";
   if (key === "resolution") {
-    // Hier die Geraeteliste selbst, nicht unsere Vorauswahl: Sie ist die
-    // Antwort auf "welche dpi kann mein Drucker".
-    const steps = (caps.resolutions || {})[source] || [];
-    return steps.length ? steps : all;
+    const max = (caps.max_resolution || {})[source];
+    return max ? all.filter((dpi) => dpi <= max) : all;
   }
   const sheet = (caps.sheet || []).find((entry) => entry.source === source);
   if (!sheet) return all;
@@ -268,20 +271,51 @@ async function loadCapabilities({ tray = true } = {}) {
   return caps;
 }
 
+// Ob Papier im Einzug liegt, aendert sich waehrend man davorsteht. Also wird
+// es laufend nachgefragt, solange der Einzug gewaehlt und die App sichtbar ist.
+function feederWatchWanted() {
+  return (
+    (getSegment("source", state.config.source) || "Platen") === "Feeder" &&
+    !document.hidden &&
+    !state.running &&
+    Boolean(state.config.scanner_url) &&
+    $("#login-overlay").hidden
+  );
+}
+
+async function pollTray() {
+  if (!feederWatchWanted()) return;
+  const tray = await api("/api/scanner/tray").catch(() => null);
+  if (!tray) return;
+  state.capabilities.adf_state = tray.adf_state;
+  renderFeederState();
+}
+
+function watchFeeder() {
+  const tick = () => {
+    pollTray().finally(() => setTimeout(tick, feederWatchWanted() ? 4000 : 12000));
+  };
+  setTimeout(tick, 800);
+}
+
 const COLOR_NAMES = { RGB24: "Farbe", Grayscale8: "Graustufen", BlackAndWhite1: "Schwarzweiß" };
 const FORMAT_NAMES = { "application/pdf": "PDF", "image/jpeg": "JPEG" };
 
 // Antwortet auf "was kann mein Drucker eigentlich?" - ausgelesen, nicht geraten.
 function renderDeviceSheet() {
   const caps = state.capabilities;
-  const card = $("#device-card");
-  card.hidden = !caps.known || !(caps.sheet || []).length;
-  if (card.hidden) return;
+  const model = $("#device-model");
+  const container = $("#device-sheet");
+  const known = caps.known && (caps.sheet || []).length;
+  model.hidden = !known;
+  if (!known) {
+    container.replaceChildren();
+    return;
+  }
 
-  $("#device-model").textContent = `${caps.model} · eSCL ${caps.version}`
+  model.textContent = `${caps.model} · eSCL ${caps.version}`
     + (caps.duplex ? " · beidseitiger Einzug" : "");
 
-  const container = $("#device-sheet");
   container.replaceChildren();
   caps.sheet.forEach((source) => {
     const box = document.createElement("div");
@@ -521,6 +555,26 @@ function applyConfig(config) {
   renderQuickRow();
   renderTiles();
   renderHaYaml();
+  renderFoldStates(config);
+}
+
+// Eingeklappt heisst nicht "unsichtbar": am Titel steht, ob es an ist.
+function renderFoldStates(config) {
+  const marks = [
+    ["#paperless-state", config.upload_to_paperless, config.upload_to_paperless ? "aktiv" : "aus"],
+    ["#ha-state", config.ha_enabled, config.ha_enabled ? "aktiv" : "aus"],
+  ];
+  marks.forEach(([selector, on, text]) => {
+    const chip = $(selector);
+    if (!chip) return;
+    chip.textContent = text;
+    chip.classList.toggle("on", Boolean(on));
+  });
+  // Wer es gerade einrichtet, soll es offen vorfinden.
+  const paperless = $("#fold-paperless");
+  if (paperless && !paperless.dataset.touched && config.upload_to_paperless && !config.paperless_url) {
+    paperless.open = true;
+  }
 }
 
 function collectConfig() {
@@ -752,6 +806,7 @@ function renderBatch(batch) {
   togglePanel(batch.active);
   // While collecting pages nothing is uploaded, so that step is not shown.
   $("#progress-steps").classList.toggle("no-upload", batch.active);
+  $("#batch-bulk").hidden = pages.length < 2;
   $("#batch-count").hidden = !batch.active || pages.length === 0;
   $("#batch-count").textContent = String(pages.length);
   $("#batch-finish").disabled = pages.length === 0;
@@ -873,6 +928,24 @@ async function armReplace(index) {
 async function removePage(index) {
   try {
     renderBatch(await api(`/api/batch/page/${index}`, { method: "DELETE" }));
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function rotateWholeBatch() {
+  try {
+    renderBatch(await api("/api/batch/rotate-all", { method: "POST", body: JSON.stringify({ degrees: 180 }) }));
+    toast("Alle Seiten gedreht", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function reverseBatch() {
+  try {
+    renderBatch(await api("/api/batch/reverse", { method: "POST" }));
+    toast("Reihenfolge umgekehrt", "success");
   } catch (error) {
     toast(error.message, "error");
   }
@@ -1590,8 +1663,9 @@ $$(".seg").forEach((group) =>
         group.dataset.target === "resolution" ? Number(button.dataset.value) : button.dataset.value;
       renderQuickRow();
       syncDeviceLimits();
+      // Umschalten auf den Einzug: sofort nachsehen, ob Papier drin liegt.
       if (group.dataset.target === "source" && button.dataset.value === "Feeder") {
-        loadCapabilities().catch(() => {});
+        pollTray().catch(() => {});
       }
     }
   })
@@ -1612,6 +1686,10 @@ $$(".quick").forEach((button) =>
     state.config[key] = next;
     setSegment(key.replace("_", "-"), next);
     renderQuickRow();
+    if (key === "source") {
+      syncDeviceLimits();
+      if (next === "Feeder") pollTray().catch(() => {});
+    }
     button.classList.add("flash");
     setTimeout(() => button.classList.remove("flash"), 320);
     try {
@@ -1710,6 +1788,9 @@ $("#batch-help-toggle").addEventListener("click", () => {
   $("#batch-help-toggle").setAttribute("aria-expanded", String(open));
 });
 $("#batch-finish").addEventListener("click", finishBatch);
+$("#batch-rotate-all").addEventListener("click", rotateWholeBatch);
+$("#batch-reverse").addEventListener("click", reverseBatch);
+
 $("#batch-cancel").addEventListener("click", async () => {
   if ((state.batch?.pages || []).length && !window.confirm("Gesammelte Seiten verwerfen?")) return;
   try {
@@ -1947,6 +2028,8 @@ $("#login-form").addEventListener("submit", async (event) => {
   }
 });
 
+$$(".fold").forEach((fold) => fold.addEventListener("toggle", () => (fold.dataset.touched = "1")));
+
 $("#device-refresh").addEventListener("click", async () => {
   const button = $("#device-refresh");
   button.disabled = true;
@@ -2037,6 +2120,7 @@ async function boot() {
     // geschlossene Tuer wuerde nur endlos neu verbinden.
     connectEvents();
     pollState();
+    watchFeeder();
     // A long-lived PWA tab should still notice a release eventually.
     setInterval(() => checkForUpdate().catch(() => {}), 6 * 3600 * 1000);
   }
@@ -2074,7 +2158,7 @@ document.addEventListener("visibilitychange", () => {
   refreshState().catch(() => {});
   prewarmScanner();
   // Ob Papier im Einzug liegt, kann sich geaendert haben, waehrend die App weg war.
-  if ((state.config.source || "Platen") === "Feeder") loadCapabilities().catch(() => {});
+  pollTray().catch(() => {});
 });
 
 // Weckt den Scanner, waehrend der Nutzer noch waehlt: HP-Geraete schlafen ein

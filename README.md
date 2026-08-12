@@ -95,6 +95,7 @@ Was du mit einer einzelnen Seite machen kannst — das Fragezeichen neben der Ü
 - **↻ Drehen** — dreht die Seite um 90° im Uhrzeigersinn, genau so wie sie später im PDF liegt. Mehrfach drücken dreht weiter.
 - **⟳ Neu scannen** — markiert die Seite; der nächste Scan tauscht genau diese Seite 1:1 aus, die Reihenfolge bleibt. Nochmal drücken bricht ab.
 - **× Entfernen** — wirft die Seite aus dem Stapel.
+- **Alle drehen / Reihenfolge umkehren** — ab zwei Seiten. Ein Einzug legt Stapel gern kopfüber oder rückwärts ein; beides ist damit in einem Tipp erledigt statt Seite für Seite.
 - **Antippen** — zeigt die Seite groß. Auf der kleinen Kachel ist oft nicht zu erkennen, welche Seite welche ist; in der Lupe blätterst du mit den Pfeilen (oder den Pfeiltasten) durch den Stapel und kannst von dort aus drehen, neu scannen oder entfernen.
 
 Während ein Stapel gesammelt wird, zeigt die Fortschrittsanzeige nur drei Schritte — es wird ja nichts hochgeladen. Der Upload-Schritt taucht erst beim Abschließen wieder auf.
@@ -115,7 +116,7 @@ Ist **Neu scannen** auf einer Seite markiert und der Einzug liefert mehrere Blat
 
 Unter *Einstellungen → Ausgabe* stehen dazu **Papierformat** (A4, Letter, Legal, A5) und **Beidseitig einziehen** — letzteres erscheint nur, wenn als Quelle der Einzug gewählt ist.
 
-**Liegt Papier im Einzug?** Ist der Einzug als Quelle gewählt, steht direkt unter den Schnellschaltern, was der Scanner sieht: *Einzug bestückt* oder *Einzug leer — Papier einlegen*. Damit ist vor dem Scan klar, woran man ist. Erkennt das Gerät eingelegtes Papier nicht, liegt es meist nicht weit genug im Fach; ScanDeck sagt das vor dem Scan, statt einen Auftrag abzuschicken, den der Drucker mit einem nackten „HTTP 409“ zurückweist.
+**Liegt Papier im Einzug?** Ist der Einzug als Quelle gewählt, steht direkt unter den Schnellschaltern, was der Scanner sieht: *Einzug bestückt* oder *Einzug leer — Papier einlegen*. Die Anzeige wird laufend aufgefrischt, solange die App offen ist — legst du Papier nach, springt sie binnen Sekunden um. Damit ist vor dem Scan klar, woran man ist. Erkennt das Gerät eingelegtes Papier nicht, liegt es meist nicht weit genug im Fach; ScanDeck sagt das vor dem Scan, statt einen Auftrag abzuschicken, den der Drucker mit einem nackten „HTTP 409“ zurückweist.
 
 Unter *Einstellungen → Was dein Scanner kann* steht, was das Gerät gemeldet hat: je Quelle die unterstützten Auflösungen, die scanbare Fläche in Millimetern, die möglichen Papierformate, Farbmodi und Dateiformate. Da lässt sich nachsehen statt raten, wie viel dpi der eigene Drucker wirklich schafft.
 

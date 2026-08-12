@@ -159,6 +159,22 @@ class BatchCollector:
             page["rotation"] = (page.get("rotation", 0) + normalise_rotation(degrees)) % 360
             return True
 
+    def rotate_all(self, degrees: int) -> int:
+        """Turn every page at once — a feeder stack is usually wrong as a whole."""
+        step = normalise_rotation(degrees)
+        with self._lock:
+            for page in self._pages:
+                page["rotation"] = (page.get("rotation", 0) + step) % 360
+            return len(self._pages)
+
+    def reverse(self) -> int:
+        """Flip the order. Many feeders deliver the last sheet first."""
+        with self._lock:
+            self._pages.reverse()
+            if self._replace_index is not None:
+                self._replace_index = len(self._pages) - 1 - self._replace_index
+            return len(self._pages)
+
     def reorder(self, order: Any) -> bool:
         # Every position exactly once, and integers only: sorting a mixed list
         # would raise instead of answering with a readable error.

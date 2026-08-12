@@ -920,6 +920,32 @@ select:focus { outline: none; border-color: rgba(255, 176, 60, 0.5); }
 }
 .overlay.closing { animation: fade-out 0.28s var(--ease) both; }
 
+.batch-bulk { display: flex; gap: 8px; flex-wrap: wrap; margin-top: -2px; }
+
+/* Einklappbare Abschnitte ------------------------------------------------- */
+.fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 15px;
+  font-weight: 600;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold-title { flex: 1; }
+.fold-state {
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--text-faint);
+}
+.fold-state.on { color: var(--ok); border-color: rgba(74, 222, 128, 0.32); background: rgba(74, 222, 128, 0.08); }
+.fold[open] > summary .chev { transform: rotate(180deg); }
+.fold-body { display: grid; gap: 12px; padding-top: 14px; }
+
 /* Zustand des Einzugs ----------------------------------------------------- */
 .feeder-chip {
   margin: -4px 0 0;

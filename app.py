@@ -798,6 +798,28 @@ def discovery_candidates() -> Response:
     return jsonify({"candidates": candidate_subnets(store.get(), request.remote_addr)[:4]})
 
 
+@app.get("/api/scanner/tray")
+def scanner_tray() -> Response:
+    """Just the sheet feeder state — small enough to ask again and again.
+
+    Whether paper lies in the tray changes while someone stands at the device,
+    so the interface polls this instead of showing a value read minutes ago.
+    """
+    config = store.get()
+    if not config.get("scanner_url") or scan_state["running"]:
+        return jsonify({"ok": False, "adf_state": ""})
+    try:
+        state_now = ScannerClient(config, logs, timings).full_status()
+    except (requests.RequestException, ET.ParseError, RuntimeError):
+        return jsonify({"ok": False, "adf_state": ""})
+    return jsonify({
+        "ok": True,
+        "adf_state": state_now["adf"],
+        "ready": state_now["adf"] in ADF_READY,
+        "device_state": state_now["state"],
+    })
+
+
 @app.post("/api/scanner/prewarm")
 def prewarm() -> Response:
     """Nudge the scanner awake while the user is still choosing settings."""
@@ -893,6 +915,23 @@ def rotate_batch_page(index: int) -> Response:
     degrees = normalise_rotation((request.get_json(silent=True) or {}).get("degrees", 90)) or 90
     if not batch.rotate(index, degrees):
         return jsonify({"error": "Diese Seite gibt es nicht."}), 404
+    return jsonify(batch.public())
+
+
+@app.post("/api/batch/rotate-all")
+def rotate_whole_batch() -> Response:
+    """Turn every collected page — a feeder stack is rarely wrong page by page."""
+    degrees = normalise_rotation((request.get_json(silent=True) or {}).get("degrees", 180)) or 180
+    count = batch.rotate_all(degrees)
+    logs.publish(f"{count} Seite(n) um {degrees}° gedreht.")
+    return jsonify(batch.public())
+
+
+@app.post("/api/batch/reverse")
+def reverse_batch() -> Response:
+    """Flip the page order, for feeders that deliver the last sheet first."""
+    count = batch.reverse()
+    logs.publish(f"Reihenfolge umgekehrt ({count} Seiten).")
     return jsonify(batch.public())
 
 

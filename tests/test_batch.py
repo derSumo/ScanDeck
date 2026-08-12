@@ -274,3 +274,49 @@ def test_finishing_is_refused_while_a_scan_runs(client, deck, tmp_path):
         assert client.post("/api/batch/finish", json={}).status_code == 409
     finally:
         deck.scan_lock.release()
+
+
+# --- whole-stack corrections ----------------------------------------------- #
+
+def test_rotating_the_whole_stack_turns_every_page(client, deck, tmp_path):
+    """A feeder stack is upside down as a whole, not page by page."""
+    client.post("/api/batch/start")
+    collect(deck, tmp_path, 3)
+    deck.batch.rotate(1, 90)  # one page already corrected by hand
+
+    body = client.post("/api/batch/rotate-all", json={"degrees": 180}).get_json()
+    assert [page["rotation"] for page in body["pages"]] == [180, 270, 180]
+
+
+def test_rotating_the_whole_stack_defaults_to_a_half_turn(client, deck, tmp_path):
+    client.post("/api/batch/start")
+    collect(deck, tmp_path, 2)
+    body = client.post("/api/batch/rotate-all", json={}).get_json()
+    assert [page["rotation"] for page in body["pages"]] == [180, 180]
+
+
+def test_reversing_flips_the_order(client, deck, tmp_path):
+    """Many feeders deliver the last sheet first."""
+    client.post("/api/batch/start")
+    collect(deck, tmp_path, 4)
+    names = [page["name"] for page in deck.batch.pages()]
+
+    body = client.post("/api/batch/reverse", json={}).get_json()
+    assert [page["name"] for page in body["pages"]] == list(reversed(names))
+
+
+def test_reversing_keeps_the_armed_page_armed(client, deck, tmp_path):
+    client.post("/api/batch/start")
+    collect(deck, tmp_path, 4)
+    armed_name = deck.batch.pages()[0]["name"]
+    client.post("/api/batch/replace", json={"index": 0})
+
+    body = client.post("/api/batch/reverse", json={}).get_json()
+    assert body["replace_index"] == 3
+    assert body["pages"][3]["name"] == armed_name
+
+
+def test_bulk_actions_on_an_empty_stack_do_nothing(client, deck):
+    client.post("/api/batch/start")
+    assert client.post("/api/batch/rotate-all", json={}).get_json()["pages"] == []
+    assert client.post("/api/batch/reverse", json={}).get_json()["pages"] == []

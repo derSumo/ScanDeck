@@ -177,11 +177,17 @@
               <li><span class="help-icon">↻</span> <b>Drehen</b> — dreht die Seite um 90°, so wie sie später im PDF liegt.</li>
               <li><span class="help-icon">⟳</span> <b>Neu scannen</b> — der nächste Scan ersetzt genau diese Seite.</li>
               <li><span class="help-icon">×</span> <b>Entfernen</b> — wirft die Seite aus dem Stapel.</li>
+              <li><span class="help-icon">🔍</span> <b>Antippen</b> — zeigt die Seite groß, mit Pfeilen zum Blättern.</li>
             </ul>
+            <p>Kommt der Stapel aus dem Einzug kopfüber oder rückwärts an, richten <b>Alle drehen</b> und <b>Reihenfolge umkehren</b> ihn in einem Zug.</p>
             <p><b>Als PDF ablegen</b> führt alles zusammen und schickt es an Paperless. <b>Verwerfen</b> löscht den Stapel.</p>
           </div>
 
           <div id="batch-pages" class="batch-pages"></div>
+          <div id="batch-bulk" class="batch-bulk" hidden>
+            <button id="batch-rotate-all" class="btn tiny ghost" type="button">Alle drehen</button>
+            <button id="batch-reverse" class="btn tiny ghost" type="button">Reihenfolge umkehren</button>
+          </div>
           <div class="batch-actions">
             <button id="batch-cancel" class="btn ghost" type="button">Verwerfen</button>
             <button id="batch-finish" class="btn primary" type="button" disabled>Als PDF ablegen</button>
@@ -241,25 +247,39 @@
 
         <section class="card">
           <div class="card-head"><h2>Scanner</h2><button id="test-scanner" class="btn tiny ghost" type="button">Test</button></div>
+          <p class="hint" id="device-model" hidden>—</p>
+          <div id="device-sheet" class="device-sheet"></div>
           <label class="field"><span>eSCL Endpoint</span><input id="scanner-url" type="url" inputmode="url" spellcheck="false" placeholder="https://192.168.1.50:443"></label>
           <button id="discover-scanners" class="btn ghost wide" type="button">Netzwerk automatisch durchsuchen</button>
           <div id="discovery-results" class="device-list" aria-live="polite"></div>
-          <details class="manual-net">
-            <summary>Netzwerk manuell angeben <span class="chev" aria-hidden="true"></span></summary>
-            <div class="field-row">
-              <label class="field"><span>Netzwerk für die Suche</span><input id="discovery-subnet" type="text" spellcheck="false" placeholder="192.168.1.0/24"></label>
-              <button id="discover-manual" class="btn ghost" type="button">Suchen</button>
+          <details class="fold">
+            <summary>Weitere Scanner-Optionen <span class="chev" aria-hidden="true"></span></summary>
+            <div class="fold-body">
+              <div class="field-row">
+                <label class="field"><span>Netzwerk für die Suche</span><input id="discovery-subnet" type="text" spellcheck="false" placeholder="192.168.1.0/24"></label>
+                <button id="discover-manual" class="btn ghost" type="button">Suchen</button>
+              </div>
+              <label class="switch"><input id="verify-scanner-ssl" type="checkbox"><i></i><span>TLS-Zertifikat prüfen</span></label>
+              <button id="device-refresh" class="btn ghost wide" type="button">Gerät neu auslesen</button>
             </div>
           </details>
-          <label class="switch"><input id="verify-scanner-ssl" type="checkbox"><i></i><span>TLS-Zertifikat prüfen</span></label>
         </section>
 
         <section class="card">
-          <div class="card-head"><h2>Paperless-ngx</h2><button id="test-paperless" class="btn tiny ghost" type="button">Test</button></div>
-          <label class="switch"><input id="upload-to-paperless" type="checkbox"><i></i><span>Scans automatisch hochladen</span></label>
-          <label class="field"><span>Paperless URL</span><input id="paperless-url" type="url" inputmode="url" spellcheck="false" placeholder="https://paperless.example.de"></label>
-          <label class="field"><span>API Token</span><input id="paperless-token" type="password" autocomplete="off" placeholder="unverändert lassen"></label>
-          <label class="field"><span>Titel-Präfix</span><input id="title-prefix" type="text" placeholder="Scan"></label>
+          <details class="fold" id="fold-paperless">
+            <summary>
+              <span class="fold-title">Paperless-ngx</span>
+              <span class="fold-state" id="paperless-state">aus</span>
+              <span class="chev" aria-hidden="true"></span>
+            </summary>
+            <div class="fold-body">
+              <label class="switch"><input id="upload-to-paperless" type="checkbox"><i></i><span>Scans automatisch hochladen</span></label>
+              <label class="field"><span>Paperless URL</span><input id="paperless-url" type="url" inputmode="url" spellcheck="false" placeholder="https://paperless.example.de"></label>
+              <label class="field"><span>API Token</span><input id="paperless-token" type="password" autocomplete="off" placeholder="unverändert lassen"></label>
+              <label class="field"><span>Titel-Präfix</span><input id="title-prefix" type="text" placeholder="Scan"></label>
+              <button id="test-paperless" class="btn ghost wide" type="button">Verbindung testen</button>
+            </div>
+          </details>
         </section>
 
         <section class="card">
@@ -301,6 +321,7 @@
               <button type="button" data-value="Grayscale8">Grau</button>
             </div>
           </div>
+          <p class="hint" id="dpi-note" hidden>1200 dpi liefert sehr feine Scans — je nach Gerät dauert eine Seite dann mehrere Minuten. Für Papierkram reichen 300 dpi.</p>
           <label class="field"><span>Ablageordner</span><input id="output-dir" type="text" spellcheck="false" placeholder="/scans"></label>
           <label class="field"><span>Vorschau nach dem Scan (Sekunden)</span><input id="preview-seconds" type="number" min="0" max="60" step="1" inputmode="numeric"></label>
         </section>
@@ -311,13 +332,6 @@
           <label class="switch"><input id="quick-tags-enabled" type="checkbox"><i></i><span>Schnell-Tags aus Paperless anbieten</span></label>
           <label class="switch"><input id="prewarm-enabled" type="checkbox"><i></i><span>Scanner beim Öffnen der App aufwecken</span></label>
           <p class="hint">Zusatzfunktionen bleiben aus, damit das Dashboard schlank bleibt.</p>
-        </section>
-
-        <section class="card" id="device-card" hidden>
-          <div class="card-head"><h2>Was dein Scanner kann</h2></div>
-          <p class="hint" id="device-model">—</p>
-          <div id="device-sheet" class="device-sheet"></div>
-          <button id="device-refresh" class="btn ghost wide" type="button">Gerät neu auslesen</button>
         </section>
 
         <section class="card">
@@ -355,18 +369,26 @@
         </section>
 
         <section class="card">
-          <div class="card-head"><h2>Home Assistant</h2></div>
-          <label class="switch"><input id="ha-enabled" type="checkbox"><i></i><span>REST-Schnittstelle aktivieren</span></label>
-          <label class="field"><span>API-Key</span><span class="copy-field"><input id="ha-api-key" type="text" readonly spellcheck="false" placeholder="noch keiner"><button id="ha-copy" class="btn tiny" type="button">Kopieren</button></span></label>
-          <div class="field-row">
-            <button id="ha-rotate" class="btn ghost" type="button">Neuen Key erzeugen</button>
-            <button id="ha-test" class="btn ghost" type="button">Endpoint testen</button>
-          </div>
-          <label class="field"><span>Webhook zurück an Home Assistant (optional)</span><input id="ha-webhook-url" type="url" inputmode="url" spellcheck="false" placeholder="https://ha.local/api/webhook/scan_fertig"></label>
-          <details class="yaml-box">
-            <summary>YAML für Home Assistant <span class="chev" aria-hidden="true"></span></summary>
-            <pre id="ha-yaml"></pre>
-            <button id="ha-yaml-copy" class="btn ghost wide" type="button">YAML kopieren</button>
+          <details class="fold" id="fold-ha">
+            <summary>
+              <span class="fold-title">Home Assistant</span>
+              <span class="fold-state" id="ha-state">aus</span>
+              <span class="chev" aria-hidden="true"></span>
+            </summary>
+            <div class="fold-body">
+              <label class="switch"><input id="ha-enabled" type="checkbox"><i></i><span>REST-Schnittstelle aktivieren</span></label>
+              <label class="field"><span>API-Key</span><span class="copy-field"><input id="ha-api-key" type="text" readonly spellcheck="false" placeholder="noch keiner"><button id="ha-copy" class="btn tiny" type="button">Kopieren</button></span></label>
+              <div class="field-row">
+                <button id="ha-rotate" class="btn ghost" type="button">Neuen Key erzeugen</button>
+                <button id="ha-test" class="btn ghost" type="button">Endpoint testen</button>
+              </div>
+              <label class="field"><span>Webhook zurück an Home Assistant (optional)</span><input id="ha-webhook-url" type="url" inputmode="url" spellcheck="false" placeholder="https://ha.local/api/webhook/scan_fertig"></label>
+              <details class="yaml-box">
+                <summary>YAML für Home Assistant <span class="chev" aria-hidden="true"></span></summary>
+                <pre id="ha-yaml"></pre>
+                <button id="ha-yaml-copy" class="btn ghost wide" type="button">YAML kopieren</button>
+              </details>
+            </div>
           </details>
         </section>
 

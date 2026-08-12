@@ -13,6 +13,22 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-08-12
+
+### Behoben
+
+- **Der Einzugszustand stand still.** „Einzug leer“ blieb stehen, obwohl längst Papier eingelegt war — der Wert wurde einmal geholt und danach nicht mehr. Er wird jetzt laufend nachgefragt (alle vier Sekunden, solange der Einzug gewählt und die App im Vordergrund ist), sofort beim Umschalten auf den Einzug und beim Zurückkehren zur App. Legst du Papier ein, springt die Anzeige binnen Sekunden auf „Einzug bestückt“.
+
+### Geändert
+
+- **Auflösungen aufgeräumt.** Die Schnellauswahl auf der Startseite schaltet nur noch zwischen **150, 300 und 600 dpi** — das sind die Stufen, die im Alltag zählen. 75, 100 und 200 dpi sind entfallen (unter 150 wird Text unbrauchbar, 200 bringt gegenüber 300 nichts). **1200 dpi** gibt es weiterhin, aber nur in den Einstellungen, mit dem Hinweis, dass eine Seite dann mehrere Minuten dauern kann. Angeboten wird davon immer nur, was das Gerät auch schafft.
+- **Einstellungen neu geordnet.** Was der Scanner kann, steht jetzt direkt in der Scanner-Karte unter Adresse und Gerätenamen, statt in einer eigenen Karte weiter unten. Seltener gebrauchte Scanner-Optionen (Suchnetz, TLS-Prüfung, neu auslesen) sind dorthin eingeklappt.
+- **Paperless-ngx und Home Assistant sind eingeklappt** und werden erst beim Antippen aufgeschlagen. Am Titel steht trotzdem, ob der Abschnitt aktiv ist, sodass man dafür nichts öffnen muss. Ist der Upload eingeschaltet, aber noch keine Adresse hinterlegt, klappt Paperless von selbst auf.
+
+### Hinzugefügt
+
+- **Alle drehen** und **Reihenfolge umkehren** für den ganzen Stapel. Ein Einzug legt Stapel gern kopfüber oder rückwärts ein; beides ist damit ein Tipp statt Seite für Seite. Die Aktionen erscheinen ab zwei Seiten, und eine markierte Seite bleibt beim Umkehren markiert.
+
 ## [1.8.0] - 2026-08-12
 
 ### Hinzugefügt
@@ -98,7 +114,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
 - Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
 - Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
-- Testsuite (166 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+- Testsuite (175 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
 
 ## [1.5.0] - 2026-08-11
 
@@ -204,7 +220,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/derSumo/ScanDeck/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/derSumo/ScanDeck/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/derSumo/ScanDeck/compare/v1.6.2...v1.7.0
 [1.6.2]: https://github.com/derSumo/ScanDeck/compare/v1.6.1...v1.6.2
