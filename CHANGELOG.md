@@ -13,6 +13,19 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-08-12
+
+### Behoben
+
+- **Einzug-Scans scheiterten immer mit „HTTP 409“.** Der Grund war nicht die Konfiguration: Ist der Einzug leer, beantwortet das Gerät *jeden* Auftrag mit 409 — unabhängig von Papierformat, Auflösung, Farbmodus und Format. Nachgemessen an einer HP DeskJet 4100, bei der alle 20 geprüften Einstellungskombinationen abgelehnt wurden, während das Vorlagenglas einwandfrei arbeitete.
+- ScanDeck liest jetzt vor jedem Einzug-Scan `AdfState` aus und sagt, was Sache ist: „Der Einzug meldet sich als leer“, „Im Einzug steckt Papier fest“ oder „Dieser Scanner meldet keinen Einzug“ — statt einen Auftrag anzulegen, der ohnehin abgelehnt wird. Das Vorlagenglas bleibt davon unberührt.
+- Die 409-Meldung beim Einzug zeigte fälschlich auf Papierformat und Auflösung und schickte damit in die falsche Richtung. Sie nennt jetzt den tatsächlichen Grund.
+- Der Verbindungstest meldet den Zustand des Einzugs mit („bestückt“, „leer“, „Papierstau“ oder „wird nicht gemeldet“). Damit lässt sich in zwei Schritten klären, ob ein Gerät überhaupt einen Einzug hat: Papier einlegen, testen — bleibt es bei „leer“, ist keiner vorhanden.
+
+### Geändert
+
+- **Schwarzweiß (1 Bit) ist als Farbmodus entfallen**; es bleiben Farbe und Graustufen. Für Belege bringt 1 Bit nichts, was Graustufen nicht besser können — Text franst aus und wird von der Texterkennung schlechter gelesen. Bestehende Konfigurationen mit Schwarzweiß werden beim Laden still auf Graustufen gehoben, es muss nichts angepasst werden.
+
 ## [1.6.1] - 2026-08-12
 
 ### Behoben
@@ -56,7 +69,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
 - Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
 - Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
-- Testsuite (142 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+- Testsuite (150 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
 
 ## [1.5.0] - 2026-08-11
 
@@ -162,7 +175,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/derSumo/ScanDeck/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/derSumo/ScanDeck/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/derSumo/ScanDeck/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/derSumo/ScanDeck/compare/v1.4.1...v1.5.0

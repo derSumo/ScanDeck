@@ -64,7 +64,11 @@ PROTECTED_KEYS = ("auth_enabled", "auth_password_hash", "session_secret")
 
 ALLOWED_SOURCES = {"Platen", "Feeder"}
 ALLOWED_RESOLUTIONS = {75, 100, 150, 200, 300, 600, 1200}
-ALLOWED_COLOR_MODES = {"RGB24", "Grayscale8", "BlackAndWhite1"}
+# Schwarzweiß (1 bit) bringt für Belege nichts, was Graustufen nicht besser
+# können: Text franst aus und Paperless erkennt ihn schlechter. Bestehende
+# Konfigurationen werden still auf Graustufen gehoben statt abgelehnt.
+ALLOWED_COLOR_MODES = {"RGB24", "Grayscale8"}
+RETIRED_COLOR_MODES = {"BlackAndWhite1": "Grayscale8"}
 ALLOWED_FORMATS = {"image/jpeg", "application/pdf"}
 
 # Scan regions in escl:ThreeHundredthsOfInches, the unit eSCL expects.
@@ -106,7 +110,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     config["verify_scanner_ssl"] = bool(config.get("verify_scanner_ssl"))
     config["source"] = config.get("source", "Platen")
     config["resolution"] = int(config.get("resolution", 300))
-    config["color_mode"] = config.get("color_mode", "RGB24")
+    color_mode = config.get("color_mode", "RGB24")
+    config["color_mode"] = RETIRED_COLOR_MODES.get(color_mode, color_mode)
     config["output_format"] = config.get("output_format", "application/pdf")
     config["paper_size"] = str(config.get("paper_size", "A4") or "A4")
     config["duplex"] = bool(config.get("duplex"))

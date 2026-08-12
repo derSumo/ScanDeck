@@ -17,10 +17,13 @@ CAPABILITIES = """<?xml version="1.0" encoding="UTF-8"?>
   <scan:AdfDuplexInputCaps><scan:MinWidth>1</scan:MinWidth></scan:AdfDuplexInputCaps>
 </scan:ScannerCapabilities>"""
 
-STATUS_IDLE = """<?xml version="1.0" encoding="UTF-8"?>
+def status_xml(state="Idle", adf="ScannerAdfLoaded"):
+    """ScannerStatus as the device sends it; adf="" means no feeder is reported."""
+    tray = f"\n  <scan:AdfState>{adf}</scan:AdfState>" if adf else ""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScannerStatus xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm"
     xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03">
-  <pwg:State>Idle</pwg:State>
+  <pwg:State>{state}</pwg:State>{tray}
 </scan:ScannerStatus>"""
 
 
@@ -51,7 +54,9 @@ class FakeResponse:
 class FakeScanner:
     """A scanner that hands out a fixed number of sheets, then reports empty."""
 
-    def __init__(self, sheets=1, content_type="application/pdf", end_status=404):
+    def __init__(self, sheets=1, content_type="application/pdf", end_status=404,
+                 adf_state="ScannerAdfLoaded"):
+        self.adf_state = adf_state
         self.sheets = sheets
         self.content_type = content_type
         self.end_status = end_status
@@ -66,7 +71,7 @@ class FakeScanner:
 
     def get(self, url, **kwargs):
         if url.endswith("ScannerStatus"):
-            return FakeResponse(text=STATUS_IDLE)
+            return FakeResponse(text=status_xml(adf=self.adf_state))
         if url.endswith("ScannerCapabilities"):
             return FakeResponse(text=CAPABILITIES)
         if url.endswith("NextDocument"):
@@ -95,8 +100,8 @@ def scanner(deck, monkeypatch):
     """Build a ScannerClient wired to a fake device."""
     from scandeck import escl
 
-    def build(sheets=1, source="Platen", end_status=404, **overrides):
-        device = FakeScanner(sheets=sheets, end_status=end_status)
+    def build(sheets=1, source="Platen", end_status=404, adf_state="ScannerAdfLoaded", **overrides):
+        device = FakeScanner(sheets=sheets, end_status=end_status, adf_state=adf_state)
         monkeypatch.setattr(escl, "scanner_session", device)
         config = deck.validate_config({
             **deck.store.get(),
@@ -258,8 +263,8 @@ DESKJET = CAPABILITIES.replace(
 class DeskJet(FakeScanner):
     """Answers ScannerCapabilities like the real device does."""
 
-    def __init__(self, sheets=1):
-        super().__init__(sheets=sheets)
+    def __init__(self, sheets=1, adf_state="ScannerAdfLoaded"):
+        super().__init__(sheets=sheets, adf_state=adf_state)
         self.capability_calls = 0
 
     def get(self, url, **kwargs):
@@ -380,3 +385,55 @@ def test_a_rejected_job_says_what_is_wrong(deskjet):
 def test_an_empty_feeder_is_named_as_such(deskjet):
     device, client = deskjet(source="Feeder")
     assert "Papier im Einzug" in client._rejection_reason(503)
+
+
+# --- the sheet feeder tray ------------------------------------------------- #
+
+def test_an_empty_tray_is_named_before_a_job_is_created(scanner):
+    """The device answers an empty tray with a bare 409 that blames nothing."""
+    device, client = scanner(sheets=3, source="Feeder", adf_state="ScannerAdfEmpty")
+    with pytest.raises(RuntimeError, match="Einzug meldet sich als leer"):
+        client.scan()
+    # No job was created at all, so nothing has to be cleaned up on the device.
+    assert device.settings_xml == ""
+
+
+def test_a_paper_jam_is_named(scanner):
+    device, client = scanner(sheets=1, source="Feeder", adf_state="ScannerAdfJam")
+    with pytest.raises(RuntimeError, match="steckt Papier fest"):
+        client.scan()
+
+
+def test_a_device_without_a_feeder_says_so(scanner):
+    device, client = scanner(sheets=1, source="Feeder", adf_state="")
+    with pytest.raises(RuntimeError, match="meldet keinen Einzug"):
+        client.scan()
+
+
+def test_a_loaded_tray_scans(scanner):
+    device, client = scanner(sheets=3, source="Feeder", adf_state="ScannerAdfLoaded")
+    assert len(client.scan()) == 3
+
+
+def test_a_tray_already_pulling_pages_is_accepted(scanner):
+    device, client = scanner(sheets=2, source="Feeder", adf_state="ScannerAdfProcessing")
+    assert len(client.scan()) == 2
+
+
+def test_the_flatbed_never_asks_about_the_tray(scanner):
+    """An empty feeder must not stand in the way of a scan from the glass."""
+    device, client = scanner(sheets=1, source="Platen", adf_state="ScannerAdfEmpty")
+    assert len(client.scan()) == 1
+
+
+def test_a_feeder_409_does_not_blame_the_paper_format(scanner):
+    device, client = scanner(sheets=1, source="Feeder")
+    message = client._rejection_reason(409)
+    assert "kein Papier" in message
+    assert "Papierformat" not in message  # that was the misleading part
+
+
+def test_the_status_reports_state_and_tray_together(scanner):
+    device, client = scanner(sheets=1, adf_state="ScannerAdfEmpty")
+    assert client.full_status() == {"state": "Idle", "adf": "ScannerAdfEmpty"}
+    assert client.status() == "Idle"

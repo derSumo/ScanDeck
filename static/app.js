@@ -7,7 +7,7 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 const LABELS = {
   source: { Platen: "Flachbett", Feeder: "Einzug" },
-  color_mode: { RGB24: "Farbe", Grayscale8: "Grau", BlackAndWhite1: "S/W" },
+  color_mode: { RGB24: "Farbe", Grayscale8: "Grau" },
   output_format: { "application/pdf": "PDF", "image/jpeg": "JPEG" },
 };
 
@@ -15,7 +15,7 @@ const QUICK_CYCLE = {
   source: ["Platen", "Feeder"],
   output_format: ["application/pdf", "image/jpeg"],
   resolution: [150, 200, 300, 600],
-  color_mode: ["RGB24", "Grayscale8", "BlackAndWhite1"],
+  color_mode: ["RGB24", "Grayscale8"],
 };
 
 const STAGE_TEXT = {

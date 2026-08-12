@@ -114,6 +114,8 @@ Ist **Neu scannen** auf einer Seite markiert und der Einzug liefert mehrere Blat
 
 Unter *Einstellungen → Ausgabe* stehen dazu **Papierformat** (A4, Letter, Legal, A5) und **Beidseitig einziehen** — letzteres erscheint nur, wenn als Quelle der Einzug gewählt ist.
 
+**Hat dein Gerät überhaupt einen Einzug?** Nicht jeder Drucker, dessen Firmware einen Einzug meldet, hat auch einen. Der Test dafür dauert zehn Sekunden: Papier in den Einzug legen, dann *Einstellungen → Scanner → Verbindung testen* drücken und ins Protokoll sehen. Steht dort „Einzug: bestückt“, ist alles in Ordnung. Bleibt es bei „Einzug: leer“, erkennt das Gerät kein Papier — dann liegt es nicht weit genug drin, oder der Drucker hat nur ein Vorlagenglas. In dem Fall meldet ScanDeck das vor dem Scan im Klartext, statt einen Auftrag abzuschicken, den der Drucker mit „HTTP 409“ zurückweist.
+
 ScanDeck fragt dabei ab, was dein Gerät überhaupt kann, und bietet nur das an: Ein Vorlagenglas, das bei A4 endet, zeigt Legal durchgestrichen; ein Einzug, der bei 300 dpi aufhört, sperrt 600 und 1200; ohne beidseitigen Einzug fehlt der Duplex-Schalter. Kommt eine Einstellung trotzdem einmal nicht durch — etwa aus einer älteren Konfiguration —, wird sie auf das machbare Maß gebracht und die Anpassung im Protokoll genannt, statt den Scan mit einem nackten „HTTP 409“ abzubrechen.
 
 ### Verlauf und Warteschlange

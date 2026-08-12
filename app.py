@@ -49,7 +49,7 @@ from scandeck.documents import (
     preview_cache,
     render_preview,
 )
-from scandeck.escl import ScannerClient, paper_sizes_for
+from scandeck.escl import ADF_EMPTY, ADF_LABELS, ADF_READY, ScannerClient, paper_sizes_for
 from scandeck.events import LogHub, TooManySubscribers
 from scandeck.jobs import JobStore, TimingStore
 from scandeck.network import (
@@ -635,6 +635,18 @@ def state() -> Response:
 # Routes: devices
 # --------------------------------------------------------------------------- #
 
+def feeder_hint(adf_state: str) -> str:
+    """Plain words for what the sheet feeder currently reports."""
+    if adf_state in ADF_READY:
+        return "bestückt, bereit zum Scannen."
+    if adf_state == ADF_EMPTY:
+        return ("leer. Liegt Papier ein und es bleibt bei „leer“, hat dieses Gerät "
+                "vermutlich gar keinen Einzug — dann bitte das Flachbett nutzen.")
+    if adf_state:
+        return ADF_LABELS.get(adf_state, adf_state)
+    return "wird von diesem Gerät nicht gemeldet."
+
+
 def capability_summary(capabilities: dict[str, Any]) -> dict[str, Any]:
     """What the interface needs in order to only offer what the device can do."""
     limits = capabilities.get("limits") or {}
@@ -650,7 +662,18 @@ def capability_summary(capabilities: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/test/scanner")
 def test_scanner() -> Response:
     try:
-        result = ScannerClient(store.get(), logs, timings).capabilities()
+        client = ScannerClient(store.get(), logs, timings)
+        result = client.capabilities()
+        # The tray state is the one thing a user can act on right away, so the
+        # test reports it instead of leaving them to guess after a refusal.
+        try:
+            status = client.full_status()
+            result["adf_state"] = status["adf"]
+            if "Feeder" in result["sources"]:
+                logs.publish(f"Einzug: {feeder_hint(status['adf'])}",
+                             "success" if status["adf"] in ADF_READY else "warning")
+        except (requests.RequestException, ET.ParseError):
+            result["adf_state"] = ""
         return jsonify({"ok": True, **capability_summary(result)})
     except (requests.RequestException, ET.ParseError, RuntimeError) as error:
         logs.publish(f"Scanner-Test fehlgeschlagen: {error}", "error")

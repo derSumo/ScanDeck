@@ -24,6 +24,17 @@ SCAN_NS = "http://schemas.hp.com/imaging/escl/2011/05/03"
 # ScanJobs, even if ScannerCapabilities reports a newer device version.
 REQUEST_ESCL_VERSION = "2.0"
 
+# What the device says about its sheet feeder tray.
+ADF_EMPTY = "ScannerAdfEmpty"
+ADF_JAM = "ScannerAdfJam"
+ADF_READY = ("ScannerAdfLoaded", "ScannerAdfProcessing")
+ADF_LABELS = {
+    ADF_EMPTY: "leer",
+    ADF_JAM: "Papierstau",
+    "ScannerAdfLoaded": "bestückt",
+    "ScannerAdfProcessing": "zieht ein",
+}
+
 # A sheet feeder that never reports "empty" must not scan forever.
 MAX_FEEDER_PAGES = 200
 FIRST_PAGE_TIMEOUT = 180
@@ -125,10 +136,18 @@ class ScannerClient:
             return {}  # an unreadable device is sent the settings unchanged
 
     def status(self) -> str:
+        return self.full_status()["state"]
+
+    def full_status(self) -> dict[str, str]:
+        """Device state plus what the sheet feeder reports about its tray."""
         response = self._get("ScannerStatus")
         response.raise_for_status()
         root = ET.fromstring(response.text)
-        return root.findtext(f".//{{{PWG_NS}}}State", default="Unknown")
+        return {
+            "state": root.findtext(f".//{{{PWG_NS}}}State", default="Unknown"),
+            # Missing entirely on devices that have no feeder at all.
+            "adf": root.findtext(f".//{{{SCAN_NS}}}AdfState", default=""),
+        }
 
     def scan(self) -> list[Path]:
         """Run one scan job and return every sheet it produced.
@@ -141,10 +160,16 @@ class ScannerClient:
         source = self.config["source"]
         started = time.monotonic()
         self.log.progress("connect", 8)
-        status = self.status()
-        self.log.publish(f"Scannerstatus: {status}")
-        if status != "Idle":
-            raise RuntimeError(f"Scanner ist nicht bereit (Status: {status}).")
+        status = self.full_status()
+        self.log.publish(f"Scannerstatus: {status['state']}"
+                         + (f" · Einzug: {ADF_LABELS.get(status['adf'], status['adf'])}" if status["adf"] else ""))
+        if status["state"] != "Idle":
+            raise RuntimeError(f"Scanner ist nicht bereit (Status: {status['state']}).")
+        if source == "Feeder":
+            # Asked with an empty tray, this device answers the job with a bare
+            # HTTP 409 that reads like a settings problem. Better to say plainly
+            # what is missing before a job is even created.
+            self._require_loaded_feeder(status["adf"])
 
         job_url = self._create_job()
 
@@ -197,16 +222,42 @@ class ScannerClient:
         self.log.publish("ScanJob angenommen; warte auf das Dokument …", "success")
         return urljoin(f"{self.base_url}/", location)
 
+    def _require_loaded_feeder(self, adf_state: str) -> None:
+        if adf_state in ADF_READY:
+            return
+        if adf_state == ADF_EMPTY:
+            raise RuntimeError(
+                "Der Einzug meldet sich als leer. Bitte die Blätter so einlegen, dass das "
+                "Gerät sie einzieht — oder auf Flachbett umstellen, falls dieser Drucker "
+                "gar keinen Einzug hat (viele DeskJet-Modelle haben nur das Vorlagenglas)."
+            )
+        if adf_state == ADF_JAM:
+            raise RuntimeError("Im Einzug steckt Papier fest. Bitte entfernen und erneut versuchen.")
+        if not adf_state:
+            # No AdfState at all: the device does not report a feeder, so a
+            # feeder job would fail with something far less readable.
+            raise RuntimeError(
+                "Dieser Scanner meldet keinen Einzug. Bitte als Quelle das Flachbett wählen."
+            )
+
     def _rejection_reason(self, status_code: int) -> str:
         """Say what the device meant. "HTTP 409" alone helps nobody."""
         source = self.config["source"]
         if status_code == 409:
+            if source == "Feeder":
+                # Measured on an HP DeskJet 4100: with an empty tray every single
+                # feeder job is answered 409, whatever the settings say. Blaming
+                # the paper format there would send people hunting in the wrong place.
+                return (
+                    "Der Einzug hat den Auftrag abgelehnt (HTTP 409). Das heißt bei diesen "
+                    "Geräten fast immer: Es liegt kein Papier im Einzug, es wurde nicht weit "
+                    "genug eingeschoben, oder der Drucker hat gar keinen Einzug."
+                )
             usable = paper_sizes_for((self.known_capabilities().get("limits") or {}).get(source) or {})
             hint = f" Dieses Gerät kann hier: {', '.join(usable)}." if usable else ""
             return (
                 "Der Scanner lehnt mindestens eine Einstellung ab (HTTP 409). "
-                f"Meist passen Papierformat oder Auflösung nicht zu {'dem Vorlagenglas' if source == 'Platen' else 'dem Einzug'}."
-                + hint
+                "Meist passen Papierformat oder Auflösung nicht zum Vorlagenglas." + hint
             )
         if status_code == 503:
             if source == "Feeder":
