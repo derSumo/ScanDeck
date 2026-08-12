@@ -170,3 +170,80 @@ def test_service_worker_carries_the_version(client, deck):
     body = client.get("/sw.js")
     assert body.headers["Content-Type"].startswith("application/javascript")
     assert deck.APP_VERSION in body.get_data(as_text=True)
+
+
+# --- only offer what the device has ---------------------------------------- #
+
+def test_capabilities_are_unknown_without_a_scanner(client):
+    """Nothing configured yet: the interface must keep offering everything."""
+    body = client.get("/api/scanner/capabilities").get_json()
+    assert body == {"ok": False, "known": False}
+
+
+def test_capabilities_name_the_sources_the_device_reports(client, deck, monkeypatch):
+    from scandeck import escl
+    from tests.test_escl import DESKJET, DeskJet
+
+    escl.capability_cache.clear()
+    monkeypatch.setattr(escl, "scanner_session", DeskJet())
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+
+    body = client.get("/api/scanner/capabilities").get_json()
+    assert body["known"] is True
+    assert body["sources"] == ["Platen", "Feeder"]
+    assert body["duplex"] is False  # so the interface hides the switch
+    assert body["resolutions"]["Feeder"] == [75, 100, 200, 300]
+    assert body["resolutions"]["Platen"] == [75, 100, 200, 300, 600, 1200]
+    assert body["paper_sizes"]["Platen"] == ["A4", "Letter", "A5"]
+    assert "Legal" in body["paper_sizes"]["Feeder"]
+
+
+def test_the_sheet_lists_every_source_in_readable_units(client, deck, monkeypatch):
+    from scandeck import escl
+    from tests.test_escl import DeskJet
+
+    escl.capability_cache.clear()
+    monkeypatch.setattr(escl, "scanner_session", DeskJet())
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+
+    sheet = {entry["source"]: entry for entry in client.get("/api/scanner/capabilities").get_json()["sheet"]}
+    assert sheet["Platen"]["label"] == "Vorlagenglas"
+    assert sheet["Platen"]["area_mm"] == [216, 297]  # A4 fits, Legal does not
+    assert sheet["Feeder"]["area_mm"] == [216, 356]
+
+
+def test_the_tray_state_is_only_read_when_asked_for(client, deck, monkeypatch):
+    """It changes constantly, so it must never come from the cache."""
+    from scandeck import escl
+    from tests.test_escl import DeskJet
+
+    escl.capability_cache.clear()
+    device = DeskJet(adf_state="ScannerAdfEmpty")
+    monkeypatch.setattr(escl, "scanner_session", device)
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+
+    assert "adf_state" not in client.get("/api/scanner/capabilities").get_json()
+    assert client.get("/api/scanner/capabilities?tray=1").get_json()["adf_state"] == "ScannerAdfEmpty"
+
+    device.adf_state = "ScannerAdfLoaded"
+    assert client.get("/api/scanner/capabilities?tray=1").get_json()["adf_state"] == "ScannerAdfLoaded"
+
+
+def test_a_device_without_a_feeder_reports_only_the_flatbed(client, deck, monkeypatch):
+    from scandeck import escl
+    from tests.test_escl import DESKJET, FakeResponse, FakeScanner
+
+    escl.capability_cache.clear()
+
+    class FlatbedOnly(FakeScanner):
+        def get(self, url, **kwargs):
+            if url.endswith("ScannerCapabilities"):
+                return FakeResponse(text=DESKJET.replace("AdfSimplexInputCaps", "Unused"))
+            return super().get(url, **kwargs)
+
+    monkeypatch.setattr(escl, "scanner_session", FlatbedOnly())
+    deck.store.patch(scanner_url="https://10.0.0.31:443")
+
+    body = client.get("/api/scanner/capabilities").get_json()
+    assert body["sources"] == ["Platen"]
+    assert [entry["source"] for entry in body["sheet"]] == ["Platen"]

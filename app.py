@@ -746,10 +746,19 @@ def scanner_capabilities() -> Response:
     config = store.get()
     if not config.get("scanner_url"):
         return jsonify({"ok": False, "known": False})
-    capabilities = ScannerClient(config, logs, timings).known_capabilities()
+    client = ScannerClient(config, logs, timings)
+    capabilities = client.known_capabilities()
     if not capabilities:
         return jsonify({"ok": False, "known": False})
-    return jsonify({"ok": True, "known": True, **capability_summary(capabilities)})
+    summary = capability_summary(capabilities)
+    # The tray state is live, never cached: it changes every time someone puts
+    # paper in, and that is exactly what the interface wants to show.
+    if request.args.get("tray") == "1" and "Feeder" in (capabilities.get("sources") or []):
+        try:
+            summary["adf_state"] = client.full_status()["adf"]
+        except (requests.RequestException, ET.ParseError, RuntimeError):
+            summary["adf_state"] = ""
+    return jsonify({"ok": True, "known": True, **summary})
 
 
 @app.post("/api/test/paperless")

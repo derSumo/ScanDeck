@@ -13,6 +13,21 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-12
+
+### Hinzugefügt
+
+- **Die Oberfläche bietet nur noch an, was der Scanner wirklich hat.** Bisher galt das für Papierformat, Auflösung und beidseitigen Einzug; jetzt auch für die **Quelle**, den **Farbmodus** und das **Dateiformat**. Ein Gerät ohne Einzug zeigt keinen Einzug mehr an, ein Gerät ohne JPEG kein JPEG. Alles stammt aus `ScannerCapabilities`, nichts ist geraten.
+- Die DPI-Auswahl wird aus den Stufen gebaut, die das Gerät meldet, statt aus einer festen Liste mit durchgestrichenen Einträgen. Auf einem Vorlagenglas stehen so etwa 75/100/200/300/600/1200 zur Wahl, im Einzug nur 75/100/200/300 — je nachdem, was das Gerät kann. Eine nicht mehr mögliche Einstellung rückt automatisch auf die nächstgelegene.
+- Auch die Schnellschalter auf dem Dashboard schalten nur noch durch das Mögliche.
+- **Zustand des Einzugs direkt am Dashboard**: Ist der Einzug als Quelle gewählt, steht dort, ob Papier eingelegt ist („Einzug bestückt“) oder nicht („Einzug leer — Papier einlegen“). Damit ist vor dem Scan sichtbar, was der Scanner sieht, statt es hinterher aus einer Fehlermeldung zu erschließen.
+- Die Gerätedaten werden selbsttätig geholt: beim Start, nach dem Wechsel des Scanners, beim Umschalten auf den Einzug und beim Zurückkehren zur App. Es muss niemand auf „Verbindung testen“ drücken, damit die Oberfläche stimmt. Der Knopf *Gerät neu auslesen* bleibt für den Fall, dass sich am Gerät etwas geändert hat.
+
+### Behoben
+
+- Der gemeldete Einzug und der Zustand des Einzugsfachs wurden vermengt. Ob ein Gerät einen Einzug **hat**, steht in `ScannerCapabilities`; ob gerade Papier **darin liegt**, in `AdfState`. Ein leeres Fach heißt jetzt nirgends mehr, dass kein Einzug vorhanden sei — die Meldung dazu ist entsprechend richtiggestellt.
+- Der Fachzustand wird nie zwischengespeichert, die Gerätefähigkeiten dagegen schon: Das eine ändert sich mit jedem eingelegten Blatt, das andere nur, wenn ein anderes Gerät angeschlossen wird.
+
 ## [1.7.0] - 2026-08-12
 
 ### Hinzugefügt
@@ -83,7 +98,7 @@ Bei `MAJOR.MINOR.PATCH` bedeutet für dieses Projekt:
 - Der Dienst verträgt mehr gleichzeitig geöffnete Oberflächen. Jede belegt einen Arbeitsfaden für das Live-Protokoll; bei acht verfügbaren war ab dem achten Tab Schluss. Es sind jetzt 32, die Zahl der Protokoll-Verbindungen ist begrenzt und eine sehr lange offene wird nach 15 Minuten erneuert.
 - Der Code liegt jetzt im Paket `scandeck/` (Konfiguration, eSCL, Netzsuche, Dokumente, Stapel, Warteschlange, Paperless, Ereignisse, Updates); `app.py` enthält nur noch die Weboberfläche und die Hintergrundschleife. Vorher standen alle 2000 Zeilen in einer Datei.
 - Das Prototyp-Skript `main.py` ist entfernt — es lief nirgends mit und enthielt eine fest eingetragene Geräteadresse.
-- Testsuite (161 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
+- Testsuite (166 Tests) für Konfiguration, Zugriffsschutz, eSCL-Gespräch, Einzug, Stapel, Warteschlange und die Home-Assistant-Schnittstelle; ohne Gerät und ohne Netz lauffähig. Sie läuft im CI, bevor ein Image gebaut wird.
 
 ## [1.5.0] - 2026-08-11
 
@@ -189,7 +204,8 @@ Erste stabile Fassung.
 - Die Auslieferung startet ohne vorkonfigurierte Endpunkte; alle Felder sind bis zum Abschluss des Assistenten leer.
 - Zusätzlich unterstützte Auflösung: 150 dpi.
 
-[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/derSumo/ScanDeck/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/derSumo/ScanDeck/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/derSumo/ScanDeck/compare/v1.6.2...v1.7.0
 [1.6.2]: https://github.com/derSumo/ScanDeck/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/derSumo/ScanDeck/compare/v1.6.0...v1.6.1

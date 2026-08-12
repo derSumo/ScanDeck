@@ -246,16 +246,32 @@ def test_capabilities_without_a_feeder(deck):
 
 # Values taken from a real HP DeskJet 4100: the flatbed stops at A4 height,
 # the feeder reaches Legal but only scans up to 300 dpi, and it cannot duplex.
+def _steps(*values):
+    inner = "".join(
+        f"<scan:DiscreteResolution><scan:XResolution>{dpi}</scan:XResolution>"
+        f"<scan:YResolution>{dpi}</scan:YResolution></scan:DiscreteResolution>"
+        for dpi in values
+    )
+    return f"<scan:SupportedResolutions><scan:DiscreteResolutions>{inner}</scan:DiscreteResolutions></scan:SupportedResolutions>"
+
+
+_MODES = ("<scan:ColorMode>BlackAndWhite1</scan:ColorMode><scan:ColorMode>Grayscale8</scan:ColorMode>"
+          "<scan:ColorMode>RGB24</scan:ColorMode>"
+          "<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>"
+          "<pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>")
+
 DESKJET = CAPABILITIES.replace(
     "<scan:PlatenInputCaps><scan:MinWidth>1</scan:MinWidth></scan:PlatenInputCaps>",
     "<scan:PlatenInputCaps><scan:MaxWidth>2550</scan:MaxWidth>"
     "<scan:MaxHeight>3508</scan:MaxHeight>"
-    "<scan:MaxOpticalXResolution>1200</scan:MaxOpticalXResolution></scan:PlatenInputCaps>",
+    "<scan:MaxOpticalXResolution>1200</scan:MaxOpticalXResolution>"
+    + _steps(75, 100, 200, 300, 600, 1200) + _MODES + "</scan:PlatenInputCaps>",
 ).replace(
     "<scan:AdfSimplexInputCaps><scan:MinWidth>1</scan:MinWidth></scan:AdfSimplexInputCaps>",
     "<scan:AdfSimplexInputCaps><scan:MaxWidth>2550</scan:MaxWidth>"
     "<scan:MaxHeight>4200</scan:MaxHeight>"
-    "<scan:MaxOpticalXResolution>300</scan:MaxOpticalXResolution></scan:AdfSimplexInputCaps>",
+    "<scan:MaxOpticalXResolution>300</scan:MaxOpticalXResolution>"
+    + _steps(75, 100, 200, 300) + _MODES + "</scan:AdfSimplexInputCaps>",
 ).replace(
     "<scan:AdfDuplexInputCaps><scan:MinWidth>1</scan:MinWidth></scan:AdfDuplexInputCaps>", "",
 )

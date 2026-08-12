@@ -127,47 +127,145 @@ function syncDuplexRow() {
   if (feeder && !canDuplex) setValue("duplex", false);
 }
 
-// Was das Geraet nicht kann, wird gar nicht erst angeboten: ein Legal-Scan auf
-// einem A4-Vorlagenglas endete sonst in einem nackten "HTTP 409".
-function syncDeviceLimits() {
-  const caps = state.capabilities;
-  const source = getSegment("source", state.config.source) || "Platen";
-  const sizes = caps.known && caps.paper_sizes ? caps.paper_sizes[source] : null;
-  const maxDpi = caps.known && caps.max_resolution ? caps.max_resolution[source] : null;
-
-  $$('.seg[data-target="paper-size"] button').forEach((button) => {
-    const ok = !sizes || sizes.includes(button.dataset.value);
+// Eine Segmentgruppe auf das eingrenzen, was das Geraet kann. Ist eine
+// gesperrte Stufe gewaehlt, rueckt die Auswahl auf eine moegliche.
+function limitSegment(target, allowed, hint, fallback) {
+  let repaired = null;
+  $$(`.seg[data-target="${target}"] button`).forEach((button) => {
+    const ok = !allowed || allowed.includes(button.dataset.value);
     button.disabled = !ok;
-    button.title = ok ? "" : `${button.dataset.value} passt nicht auf diese Quelle`;
-    if (!ok && button.classList.contains("active")) setSegment("paper-size", sizes[0] || "A4");
+    button.title = ok ? "" : hint;
+    if (!ok && button.classList.contains("active")) repaired = fallback(allowed);
   });
-
-  // Die Liste der Stufen kennt das Geraet selbst; sie schlaegt die Obergrenze.
-  const steps = caps.known && caps.resolutions ? caps.resolutions[source] : null;
-  $$('.seg[data-target="resolution"] button').forEach((button) => {
-    const dpi = Number(button.dataset.value);
-    const ok = steps && steps.length ? steps.includes(dpi) : !maxDpi || dpi <= maxDpi;
-    button.disabled = !ok;
-    button.title = ok
-      ? ""
-      : steps && steps.length
-      ? `Diese Quelle kann: ${steps.join(", ")} dpi`
-      : `Diese Quelle scannt höchstens ${maxDpi} dpi`;
-    if (!ok && button.classList.contains("active")) {
-      const fallback = steps && steps.length
-        ? steps.reduce((best, value) => (Math.abs(value - dpi) < Math.abs(best - dpi) ? value : best))
-        : maxDpi;
-      setSegment("resolution", fallback);
-    }
-  });
-  syncDuplexRow();
+  if (repaired !== null && repaired !== undefined) setSegment(target, repaired);
 }
 
-async function loadCapabilities() {
-  const caps = await api("/api/scanner/capabilities").catch(() => ({ known: false }));
-  state.capabilities = caps;
+// Was das Geraet nicht kann, wird gar nicht erst angeboten: ein Legal-Scan auf
+// einem A4-Vorlagenglas endete sonst in einem nackten "HTTP 409", und eine
+// Quelle, die es nicht gibt, waere nur ein Weg in eine Fehlermeldung.
+function syncDeviceLimits() {
+  const caps = state.capabilities;
+  const known = Boolean(caps.known);
+
+  // Quelle zuerst: alles Weitere haengt davon ab, welche gewaehlt ist.
+  limitSegment(
+    "source",
+    known && caps.sources && caps.sources.length ? caps.sources : null,
+    "Diese Quelle meldet der Scanner nicht",
+    (allowed) => allowed[0]
+  );
+
+  const source = getSegment("source", state.config.source) || "Platen";
+  const forSource = (field) => (known && caps[field] ? caps[field][source] : null);
+  const sizes = forSource("paper_sizes");
+  const maxDpi = forSource("max_resolution");
+
+  limitSegment("paper-size", sizes, "Passt nicht auf diese Quelle", (allowed) => allowed[0] || "A4");
+
+  const sheet = known && caps.sheet ? caps.sheet.find((entry) => entry.source === source) : null;
+  limitSegment(
+    "color-mode",
+    sheet && sheet.color_modes.length ? sheet.color_modes : null,
+    "Diesen Farbmodus kann die Quelle nicht",
+    (allowed) => allowed[0]
+  );
+  limitSegment(
+    "output-format",
+    sheet && sheet.formats.length ? sheet.formats : null,
+    "Dieses Format kann die Quelle nicht",
+    (allowed) => allowed[0]
+  );
+
+  // Die Stufen kennt das Geraet selbst, also werden genau die angeboten -
+  // eine durchgestrichene Liste voller unmoeglicher Werte hilft niemandem.
+  const steps = forSource("resolutions");
+  renderResolutionSegment(steps && steps.length ? steps : null, maxDpi);
+  syncDuplexRow();
+  renderFeederState();
+}
+
+const DEFAULT_DPI_STEPS = [75, 150, 200, 300, 600, 1200];
+
+function renderResolutionSegment(steps, maxDpi) {
+  const group = $('.seg[data-target="resolution"]');
+  if (!group) return;
+  const wanted = Number(getSegment("resolution", state.config.resolution)) || 300;
+  const options = steps || DEFAULT_DPI_STEPS.filter((dpi) => !maxDpi || dpi <= maxDpi);
+  const signature = options.join(",");
+  if (group.dataset.signature !== signature) {
+    group.dataset.signature = signature;
+    group.replaceChildren(
+      ...options.map((dpi) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.value = String(dpi);
+        button.textContent = String(dpi);
+        return button;
+      })
+    );
+  }
+  // Auf die naechstgelegene mögliche Stufe rücken, falls die gewählte fehlt.
+  const nearest = options.includes(wanted)
+    ? wanted
+    : options.reduce((best, value) => (Math.abs(value - wanted) < Math.abs(best - wanted) ? value : best),
+                     options[0]);
+  setSegment("resolution", nearest);
+  state.config.resolution = nearest;
+}
+
+// Die Schnellschalter auf das eingrenzen, was der Scanner gemeldet hat.
+function quickOptions(key) {
+  const caps = state.capabilities;
+  const all = QUICK_CYCLE[key];
+  if (!caps.known) return all;
+  if (key === "source") {
+    const sources = caps.sources || [];
+    return all.filter((option) => sources.includes(option));
+  }
+  const source = state.config.source || "Platen";
+  if (key === "resolution") {
+    // Hier die Geraeteliste selbst, nicht unsere Vorauswahl: Sie ist die
+    // Antwort auf "welche dpi kann mein Drucker".
+    const steps = (caps.resolutions || {})[source] || [];
+    return steps.length ? steps : all;
+  }
+  const sheet = (caps.sheet || []).find((entry) => entry.source === source);
+  if (!sheet) return all;
+  const allowed = key === "color_mode" ? sheet.color_modes : sheet.formats;
+  return allowed && allowed.length ? all.filter((option) => allowed.includes(option)) : all;
+}
+
+const ADF_TEXT = {
+  ScannerAdfLoaded: ["Einzug bestückt", "ok"],
+  ScannerAdfProcessing: ["Einzug zieht ein", "ok"],
+  ScannerAdfEmpty: ["Einzug leer — Papier einlegen", "warn"],
+  ScannerAdfJam: ["Papierstau im Einzug", "warn"],
+};
+
+// Beim Einzug ist die eine Frage vor dem Scan: liegt Papier drin und erkennt
+// es das Geraet? Das steht jetzt dort, wo die Quelle gewaehlt wird.
+function renderFeederState() {
+  const chip = $("#feeder-state");
+  if (!chip) return;
+  const source = getSegment("source", state.config.source) || "Platen";
+  const adf = state.capabilities.adf_state;
+  if (source !== "Feeder" || !adf) {
+    chip.hidden = true;
+    return;
+  }
+  const [text, kind] = ADF_TEXT[adf] || [adf, ""];
+  chip.hidden = false;
+  chip.textContent = text;
+  chip.className = `feeder-chip ${kind}`;
+}
+
+async function loadCapabilities({ tray = true } = {}) {
+  const caps = await api(`/api/scanner/capabilities${tray ? "?tray=1" : ""}`).catch(() => ({ known: false }));
+  // Den Fachzustand nicht verlieren, wenn eine Abfrage ihn nicht mitliefert.
+  state.capabilities = { adf_state: state.capabilities.adf_state, ...caps };
   syncDeviceLimits();
   renderDeviceSheet();
+  return caps;
 }
 
 const COLOR_NAMES = { RGB24: "Farbe", Grayscale8: "Graustufen", BlackAndWhite1: "Schwarzweiß" };
@@ -456,9 +554,12 @@ function collectConfig() {
 }
 
 async function saveSettings(announce = true) {
+  const previousScanner = state.config.scanner_url;
   const config = await api("/api/config", { method: "PUT", body: JSON.stringify(collectConfig()) });
   setValue("paperless-token", "");
   applyConfig(config);
+  // Anderer Scanner, andere Faehigkeiten - also frisch auslesen.
+  if (config.scanner_url && config.scanner_url !== previousScanner) loadCapabilities().catch(() => {});
   if (announce) toast("Gespeichert", "success");
   return config;
 }
@@ -1489,6 +1590,9 @@ $$(".seg").forEach((group) =>
         group.dataset.target === "resolution" ? Number(button.dataset.value) : button.dataset.value;
       renderQuickRow();
       syncDeviceLimits();
+      if (group.dataset.target === "source" && button.dataset.value === "Feeder") {
+        loadCapabilities().catch(() => {});
+      }
     }
   })
 );
@@ -1496,7 +1600,13 @@ $$(".seg").forEach((group) =>
 $$(".quick").forEach((button) =>
   button.addEventListener("click", async () => {
     const key = button.dataset.quick;
-    const options = QUICK_CYCLE[key];
+    // Nur durchschalten, was das Geraet auch kann - sonst tippt man sich in
+    // eine Einstellung, die der Scanner beim naechsten Mal ablehnt.
+    const options = quickOptions(key);
+    if (options.length < 2) {
+      toast(`Dein Scanner bietet hier nur eine Möglichkeit.`, "warning");
+      return;
+    }
     const current = options.findIndex((option) => String(option) === String(state.config[key]));
     const next = options[(current + 1) % options.length];
     state.config[key] = next;
@@ -1837,6 +1947,23 @@ $("#login-form").addEventListener("submit", async (event) => {
   }
 });
 
+$("#device-refresh").addEventListener("click", async () => {
+  const button = $("#device-refresh");
+  button.disabled = true;
+  try {
+    // Ueber den Test statt den Cache: der liest das Geraet wirklich neu aus.
+    const result = await api("/api/test/scanner", { method: "POST", body: "{}" });
+    state.capabilities = { ...result, known: true };
+    syncDeviceLimits();
+    renderDeviceSheet();
+    toast("Gerät neu ausgelesen", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $("#auth-enable").addEventListener("click", async () => {
   const password = getValue("auth-password");
   if (password !== getValue("auth-password-repeat")) {
@@ -1946,6 +2073,8 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden || !$("#login-overlay").hidden) return;
   refreshState().catch(() => {});
   prewarmScanner();
+  // Ob Papier im Einzug liegt, kann sich geaendert haben, waehrend die App weg war.
+  if ((state.config.source || "Platen") === "Feeder") loadCapabilities().catch(() => {});
 });
 
 // Weckt den Scanner, waehrend der Nutzer noch waehlt: HP-Geraete schlafen ein
